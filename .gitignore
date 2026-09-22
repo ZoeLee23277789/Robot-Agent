@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+rmenv/
+env/
+
+# Secrets and local config
+.env
+*.key
+credentials.json
+config.local.*
+
+# CoppeliaSim
+*.ttt~
+*.ttm~
+coppeliaSim.log*
+*.log
+
+# Robot / agent runtime output
+logs/
+runs/
+snapshots/
+captures/
+*.mp4
+*.jpg
+*.png
+
+# OS and editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

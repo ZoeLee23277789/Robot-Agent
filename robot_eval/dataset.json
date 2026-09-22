@@ -1,0 +1,390 @@
+{
+  "tasks": [
+    {
+      "id": "nav_001",
+      "difficulty": "easy",
+      "category": "navigation",
+      "description": "Turn left 90 degrees, then stop.",
+      "milestones": [
+        {"id": "m1", "description": "The robot rotated to the left by roughly 90 degrees",
+         "telemetry": {"field": "yaw_deg", "abs_min": 75, "abs_max": 105, "when": "final", "relative_to_start": true, "angular": true}}
+      ]
+    },
+    {
+      "id": "nav_002",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Find the red box and stop about 30 cm in front of it, facing it.",
+      "milestones": [
+        {"id": "m1", "description": "The red box is visible in the camera image at some point"},
+        {"id": "m2", "description": "The red box is horizontally centred in the camera image"},
+        {"id": "m3", "description": "The robot ends close to the red box without hitting it",
+         "telemetry": {"field": "tof_front_mm", "min": 150, "max": 450, "when": "final"}}
+      ]
+    },
+    {
+      "id": "grounding_001",
+      "difficulty": "easy",
+      "category": "grounding",
+      "description": "Without moving the chassis, look at the scene and report which objects you see and their colours.",
+      "milestones": [
+        {"id": "m1", "description": "The final report names the objects that are actually visible in the camera images"}
+      ]
+    },
+    {
+      "id": "manip_001",
+      "difficulty": "hard",
+      "category": "manipulation",
+      "description": "Drive to the red box, grasp it with the gripper and lift it.",
+      "milestones": [
+        {"id": "m1", "description": "The gripper was opened before approaching the box",
+         "telemetry": {"field": "gripper", "equals": "opened", "when": "any"}},
+        {"id": "m2", "description": "The red box sits between the gripper fingers in the camera image"},
+        {"id": "m3", "description": "The gripper closed on the box",
+         "telemetry": {"field": "gripper", "in": ["closed", "normal"], "when": "final"}},
+        {"id": "m4", "description": "The box is lifted off the ground and moves together with the gripper"}
+      ]
+    },
+
+    {
+      "id": "e01",
+      "difficulty": "easy",
+      "category": "navigation",
+      "description": "Turn right 90 degrees, then stop.",
+      "milestones": [
+        {"id": "m1", "description": "The robot rotated to the right by roughly 90 degrees",
+         "telemetry": {"field": "yaw_deg", "abs_min": 75, "abs_max": 105, "when": "final", "relative_to_start": true, "angular": true}}
+      ]
+    },
+    {
+      "id": "e02",
+      "difficulty": "easy",
+      "category": "navigation",
+      "description": "Turn around 180 degrees (either direction), then stop.",
+      "milestones": [
+        {"id": "m1", "description": "The robot rotated by roughly 180 degrees",
+         "telemetry": {"field": "yaw_deg", "abs_min": 165, "abs_max": 195, "when": "final", "relative_to_start": true, "angular": true}}
+      ]
+    },
+    {
+      "id": "e03",
+      "difficulty": "easy",
+      "category": "navigation",
+      "description": "Drive forward about 0.3 meters in a straight line, then stop.",
+      "milestones": [
+        {"id": "m1", "description": "The robot drove forward roughly 0.3m without a large rotation, per its own odometry log"}
+      ]
+    },
+    {
+      "id": "e04",
+      "difficulty": "easy",
+      "category": "grounding",
+      "description": "Without moving the chassis, look at the ball pit and report how many different ball colours you can see.",
+      "milestones": [
+        {"id": "m1", "description": "The final report lists ball colours that are actually visible in the ball pit images"}
+      ]
+    },
+    {
+      "id": "e05",
+      "difficulty": "easy",
+      "category": "grounding",
+      "description": "Without driving, raise the arm to get a better view, then report what new objects become visible that were not visible before.",
+      "milestones": [
+        {"id": "m1", "description": "The arm was raised to a noticeably different height",
+         "telemetry": {"field": "arm_mm.y", "min": 90, "when": "any"}},
+        {"id": "m2", "description": "The final report correctly describes objects newly visible after raising the arm"}
+      ]
+    },
+    {
+      "id": "e06",
+      "difficulty": "easy",
+      "category": "grounding",
+      "description": "Find the purple ball and report roughly how far away it looks from your starting position.",
+      "milestones": [
+        {"id": "m1", "description": "The purple ball is visible in the camera image at some point"},
+        {"id": "m2", "description": "The final report gives a plausible distance estimate for the purple ball"}
+      ]
+    },
+    {
+      "id": "e07",
+      "difficulty": "easy",
+      "category": "grounding",
+      "description": "Rotate in place to scan the room and report the colour of each corner pillar you spot, in the order you saw them.",
+      "milestones": [
+        {"id": "m1", "description": "At least two of the four corner pillars (red, blue, yellow, green) are visible at some point"},
+        {"id": "m2", "description": "The final report names pillar colours that match what was actually seen, in a plausible order"}
+      ]
+    },
+    {
+      "id": "e08",
+      "difficulty": "easy",
+      "category": "manipulation",
+      "description": "Open the gripper, wait a moment, then close it again, without moving the chassis.",
+      "milestones": [
+        {"id": "m1", "description": "The gripper was opened",
+         "telemetry": {"field": "gripper", "equals": "opened", "when": "any"}},
+        {"id": "m2", "description": "The gripper ended closed (or normal) again",
+         "telemetry": {"field": "gripper", "in": ["closed", "normal"], "when": "final"}}
+      ]
+    },
+    {
+      "id": "e09",
+      "difficulty": "easy",
+      "category": "grounding",
+      "description": "Find the orange tunnel and report whether you can see through to the far side from where you are.",
+      "milestones": [
+        {"id": "m1", "description": "The orange tunnel is visible in the camera image at some point"},
+        {"id": "m2", "description": "The final report gives a reasonable answer about visibility through the tunnel"}
+      ]
+    },
+    {
+      "id": "e10",
+      "difficulty": "easy",
+      "category": "navigation",
+      "description": "Turn until the ball pit's black-and-white checkered border is centred in your camera image, then stop.",
+      "milestones": [
+        {"id": "m1", "description": "The ball pit's checkered border ends up horizontally centred in the final camera image"}
+      ]
+    },
+
+    {
+      "id": "m01",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Find the blue storage box (the open bin used for the balls) and stop about 30 cm in front of it, facing it.",
+      "milestones": [
+        {"id": "m1", "description": "The blue storage bin is visible in the camera image at some point"},
+        {"id": "m2", "description": "The blue storage bin is horizontally centred in the camera image"},
+        {"id": "m3", "description": "The robot ends close to it without hitting it",
+         "telemetry": {"field": "tof_front_mm", "min": 150, "max": 450, "when": "final"}}
+      ]
+    },
+    {
+      "id": "m02",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Find the orange tunnel and drive all the way through it to come out on the other side.",
+      "milestones": [
+        {"id": "m1", "description": "The robot is seen entering the tunnel"},
+        {"id": "m2", "description": "The final image shows the scene from the far side of the tunnel, having passed through it"}
+      ]
+    },
+    {
+      "id": "m03",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Approach the ball pit and stop right at its edge without touching the checkered border.",
+      "milestones": [
+        {"id": "m1", "description": "The ball pit is visible in the camera image at some point"},
+        {"id": "m2", "description": "The robot ends close to the ball pit's border without touching it",
+         "telemetry": {"field": "tof_front_mm", "min": 100, "max": 400, "when": "final"}}
+      ]
+    },
+    {
+      "id": "m04",
+      "difficulty": "medium",
+      "category": "grounding",
+      "description": "Find the small yellow block and get close enough to see its shape clearly, without touching it.",
+      "milestones": [
+        {"id": "m1", "description": "The small yellow block is visible in the camera image at some point"},
+        {"id": "m2", "description": "The robot ends close to it without touching it",
+         "telemetry": {"field": "tof_front_mm", "min": 80, "when": "final"}}
+      ]
+    },
+    {
+      "id": "m05",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Navigate underneath the elevated platform (drive under it, not around it) without hitting the black support posts.",
+      "milestones": [
+        {"id": "m1", "description": "The platform's underside/support posts are visible up close at some point"},
+        {"id": "m2", "description": "The robot is seen having passed under the platform to the other side, without colliding with a post"}
+      ]
+    },
+    {
+      "id": "m06",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Find the orange storage bin (the one used for blocks) and stop in front of it.",
+      "milestones": [
+        {"id": "m1", "description": "The orange storage bin is visible in the camera image at some point"},
+        {"id": "m2", "description": "The robot ends close to it without hitting it",
+         "telemetry": {"field": "tof_front_mm", "min": 150, "max": 450, "when": "final"}}
+      ]
+    },
+    {
+      "id": "m07",
+      "difficulty": "medium",
+      "category": "manipulation",
+      "description": "Find the green foam beam and push it a short distance with the chassis (do not try to grasp it, just nudge it).",
+      "milestones": [
+        {"id": "m1", "description": "The green foam beam is visible in the camera image at some point"},
+        {"id": "m2", "description": "The beam's position visibly changed between an earlier image and a later image, consistent with being pushed"}
+      ]
+    },
+    {
+      "id": "m08",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Drive to the bench in the northeast area of the room and stop facing it.",
+      "milestones": [
+        {"id": "m1", "description": "The bench is visible in the camera image at some point"},
+        {"id": "m2", "description": "The robot ends facing the bench at a reasonably close distance"}
+      ]
+    },
+    {
+      "id": "m09",
+      "difficulty": "medium",
+      "category": "grounding",
+      "description": "Visit both the red pillar and the blue pillar (they stand in different corners of the room) and report which one you reached first.",
+      "milestones": [
+        {"id": "m1", "description": "The red pillar is visible up close at some point"},
+        {"id": "m2", "description": "The blue pillar is visible up close at some point"},
+        {"id": "m3", "description": "The final report correctly states which pillar was reached first, matching the step log"}
+      ]
+    },
+    {
+      "id": "m10",
+      "difficulty": "medium",
+      "category": "grounding",
+      "description": "Approach the ball pit from a safe distance and report roughly how many loose balls you can see sitting on top of the fixed layer.",
+      "milestones": [
+        {"id": "m1", "description": "The ball pit's top layer of loose balls is clearly visible at some point"},
+        {"id": "m2", "description": "The final report gives a plausible count or estimate of the loose balls"}
+      ]
+    },
+
+    {
+      "id": "h01",
+      "difficulty": "hard",
+      "category": "manipulation",
+      "description": "Find the small blue block, grasp it with the gripper, and lift it off the ground.",
+      "milestones": [
+        {"id": "m1", "description": "The gripper was opened before approaching the block",
+         "telemetry": {"field": "gripper", "equals": "opened", "when": "any"}},
+        {"id": "m2", "description": "The small blue block sits between the gripper fingers in the camera image"},
+        {"id": "m3", "description": "The gripper closed on the block",
+         "telemetry": {"field": "gripper", "in": ["closed", "normal"], "when": "final"}},
+        {"id": "m4", "description": "The block is lifted off the ground and moves together with the gripper"}
+      ]
+    },
+    {
+      "id": "h02",
+      "difficulty": "hard",
+      "category": "manipulation",
+      "description": "Find a small block of any colour, pick it up, and carry it onto the blue mat.",
+      "milestones": [
+        {"id": "m1", "description": "The gripper was opened before approaching a block",
+         "telemetry": {"field": "gripper", "equals": "opened", "when": "any"}},
+        {"id": "m2", "description": "The gripper closed on a small block",
+         "telemetry": {"field": "gripper", "in": ["closed", "normal"], "when": "any"}},
+        {"id": "m3", "description": "The block ends up resting on the blue mat in the final image"}
+      ]
+    },
+    {
+      "id": "h03",
+      "difficulty": "hard",
+      "category": "manipulation",
+      "description": "Find the small green block, grasp it, and drop it into the orange storage bin.",
+      "milestones": [
+        {"id": "m1", "description": "The gripper was opened before approaching the green block",
+         "telemetry": {"field": "gripper", "equals": "opened", "when": "any"}},
+        {"id": "m2", "description": "The gripper closed on the green block",
+         "telemetry": {"field": "gripper", "in": ["closed", "normal"], "when": "any"}},
+        {"id": "m3", "description": "The gripper opened again over the orange bin to release the block",
+         "telemetry": {"field": "gripper", "equals": "opened", "when": "final"}},
+        {"id": "m4", "description": "The green block ends up inside the orange storage bin in the final image"}
+      ]
+    },
+    {
+      "id": "h04",
+      "difficulty": "hard",
+      "category": "navigation",
+      "description": "Drive through the orange tunnel, then continue on to find and stop in front of the platform's slide.",
+      "milestones": [
+        {"id": "m1", "description": "The robot is seen passing through the orange tunnel"},
+        {"id": "m2", "description": "The blue slide is visible in the camera image at some point after the tunnel"},
+        {"id": "m3", "description": "The robot ends stopped facing the slide at a reasonably close distance"}
+      ]
+    },
+    {
+      "id": "h05",
+      "difficulty": "hard",
+      "category": "manipulation",
+      "description": "Pick up the orange ball and place it on the red mat.",
+      "milestones": [
+        {"id": "m1", "description": "The gripper was opened before approaching the orange ball",
+         "telemetry": {"field": "gripper", "equals": "opened", "when": "any"}},
+        {"id": "m2", "description": "The gripper closed on the orange ball",
+         "telemetry": {"field": "gripper", "in": ["closed", "normal"], "when": "any"}},
+        {"id": "m3", "description": "The gripper opened again over the red mat to release the ball",
+         "telemetry": {"field": "gripper", "equals": "opened", "when": "final"}},
+        {"id": "m4", "description": "The orange ball ends up resting on the red mat in the final image"}
+      ]
+    },
+    {
+      "id": "h06",
+      "difficulty": "hard",
+      "category": "manipulation",
+      "description": "Find the small yellow block, grasp it, then release it on the green mat.",
+      "milestones": [
+        {"id": "m1", "description": "The gripper was opened before approaching the yellow block",
+         "telemetry": {"field": "gripper", "equals": "opened", "when": "any"}},
+        {"id": "m2", "description": "The gripper closed on the yellow block",
+         "telemetry": {"field": "gripper", "in": ["closed", "normal"], "when": "any"}},
+        {"id": "m3", "description": "The gripper opened again over the green mat to release the block",
+         "telemetry": {"field": "gripper", "equals": "opened", "when": "final"}},
+        {"id": "m4", "description": "The yellow block ends up resting on the green mat in the final image"}
+      ]
+    },
+    {
+      "id": "h07",
+      "difficulty": "hard",
+      "category": "navigation",
+      "description": "Drive around the ball pit (do not enter or touch it) to reach the blue foam cube on the far side, and stop in front of it.",
+      "milestones": [
+        {"id": "m1", "description": "The robot's path visibly goes around the ball pit rather than through it, based on the step log and images"},
+        {"id": "m2", "description": "The blue foam cube is visible in the camera image at some point"},
+        {"id": "m3", "description": "The robot ends close to the blue foam cube without hitting it",
+         "telemetry": {"field": "tof_front_mm", "min": 150, "max": 450, "when": "final"}}
+      ]
+    },
+    {
+      "id": "h08",
+      "difficulty": "hard",
+      "category": "manipulation",
+      "description": "Pick up any one of the small blocks, then put it into the correct storage bin: blocks belong in the orange bin.",
+      "milestones": [
+        {"id": "m1", "description": "The gripper closed on a small block",
+         "telemetry": {"field": "gripper", "in": ["closed", "normal"], "when": "any"}},
+        {"id": "m2", "description": "The gripper opened again over the orange bin to release it",
+         "telemetry": {"field": "gripper", "equals": "opened", "when": "final"}},
+        {"id": "m3", "description": "The block ends up inside the orange storage bin, not the blue one, in the final image"}
+      ]
+    },
+    {
+      "id": "h09",
+      "difficulty": "hard",
+      "category": "manipulation",
+      "description": "Locate the purple ball, approach it carefully (it sits close to the ball pit's border), and grasp it without touching the border.",
+      "milestones": [
+        {"id": "m1", "description": "The purple ball is visible in the camera image at some point"},
+        {"id": "m2", "description": "The gripper closed on the purple ball",
+         "telemetry": {"field": "gripper", "in": ["closed", "normal"], "when": "final"}},
+        {"id": "m3", "description": "The approach did not visibly collide with the ball pit's border"}
+      ]
+    },
+    {
+      "id": "h10",
+      "difficulty": "hard",
+      "category": "navigation",
+      "description": "Starting from the entrance, drive underneath the platform to the far side, then stop facing the slide's landing area, without touching the black support posts.",
+      "milestones": [
+        {"id": "m1", "description": "The robot is seen passing underneath the platform between the support posts"},
+        {"id": "m2", "description": "The slide's landing area is visible and roughly centred in the final camera image"},
+        {"id": "m3", "description": "The robot ends at a safe distance from anything in front of it",
+         "telemetry": {"field": "tof_front_mm", "min": 100, "when": "final"}}
+      ]
+    }
+  ]
+}

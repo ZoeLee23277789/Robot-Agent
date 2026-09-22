@@ -1,0 +1,12 @@
+# Agent 端 (Python 3.11+)。機器人端的 robot_server.py 另外在 rmenv 裡跑，只需要 robomaster 和 opencv-python。
+pydantic>=2.7
+pydantic-settings>=2.2
+python-dotenv>=1.0.0
+psutil>=5.9
+httpx>=0.27
+
+# 依照你用的 provider 擇一安裝即可
+openai>=1.40.0
+anthropic>=0.40.0
+google-genai>=1.0.0
+ollama>=0.4.0
