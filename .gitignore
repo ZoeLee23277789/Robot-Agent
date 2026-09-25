@@ -5,7 +5,7 @@ __pycache__/
 .venv/
 rmenv/
 env/
-
+.runs/
 # Secrets and local config
 .env
 *.key
@@ -21,6 +21,7 @@ coppeliaSim.log*
 # Robot / agent runtime output
 logs/
 runs/
+robot_eval/results/
 snapshots/
 captures/
 *.mp4
@@ -32,3 +33,6 @@ captures/
 .idea/
 .vscode/
 *.swp
+
+# 換成真的 browser_use 套件之前的舊版備份，純粹保險用，不進版控
+browser_use_stub_backup_do_not_commit/

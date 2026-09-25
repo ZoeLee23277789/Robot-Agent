@@ -79,6 +79,14 @@ class RobotClient:
             return None
         return raw if status == 200 and ctype.startswith("image/") else None
 
+    async def overhead_depth(self) -> Optional[bytes]:
+        """俯視攝影機的深度圖 (16-bit PNG，每像素是距離，單位 mm)；沒有的話回傳 None。"""
+        try:
+            status, ctype, raw = await asyncio.to_thread(self._request, "GET", "/overhead_depth.png", None, 15.0)
+        except Exception:
+            return None
+        return raw if status == 200 and ctype.startswith("image/") else None
+
     async def act(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
         try:
             return await asyncio.to_thread(

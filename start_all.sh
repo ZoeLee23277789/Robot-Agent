@@ -2,7 +2,7 @@
 # 一次把「機器人端」準備好，取代手動打好幾個指令：
 #   1. 確認 CoppeliaSim 有反應，模擬是停止狀態的話自動幫你按播放
 #   2. 啟動 robot_server.py（用 hybrid backend，背景執行），已經在跑的話就重用
-#   3. 加上三個真的距離感測器（第一次加完之後 server 要重開一次才讀得到，這裡會自動處理）
+#   3. 確認三個真的距離感測器有上線（robot_server.py 自己會建立/重建，這裡只是檢查一下）
 #
 # 用法：
 #   ./start_all.sh              一般啟動
@@ -18,7 +18,11 @@ LOG="/tmp/robot_server.log"
 
 start_server() {
     echo "啟動 robot_server.py（log 在 $LOG）..."
-    nohup ~/rmenv/bin/python robot_server.py --mode sim --chassis-backend hybrid > "$LOG" 2>&1 &
+    # -u：關掉 stdout/stderr 的區塊緩衝。輸出導向檔案（不是終端機）時 Python 預設不會
+    # 每行都立刻寫檔，要等緩衝區滿了或程序結束才會真的落地——之前 world_xy 的 log
+    # 就是因為這樣，明明有在印，但 robot_server.py 還在跑的時候 grep /tmp/robot_server.log
+    # 永遠是空的，看起來像 log 沒生效，其實只是還沒被沖進磁碟。
+    nohup ~/rmenv/bin/python -u robot_server.py --mode sim --chassis-backend hybrid > "$LOG" 2>&1 &
     disown
     for i in $(seq 1 40); do
         sleep 1
@@ -63,17 +67,13 @@ else
 fi
 
 echo "== 3. 距離感測器 =="
+# robot_server.py 現在會自己在啟動時建立三個距離感測器（見 _create_prox_sensors()），
+# 不再需要外部的 add_proximity_sensors.py + 重開一次的舊流程；這裡只是確認一下有沒有成功。
 if curl -s -m 2 "$SERVER_URL/state" | grep -q tof_front_mm; then
-    echo "感測器已經在線，跳過。"
+    echo "感測器已經在線。"
 else
-    .venv/bin/python add_proximity_sensors.py
-    echo "感測器剛建立，robot_server.py 只在啟動當下掃描一次，重開一次讓它讀到..."
-    pkill -f "robot_server.py" 2>/dev/null || true
-    sleep 1
-    start_server || exit 1
-    if ! curl -s -m 2 "$SERVER_URL/state" | grep -q tof_front_mm; then
-        echo "重開後還是沒讀到感測器，需要再查一下，其他功能不受影響（會退回用死掉的 tof_distance_mm）。"
-    fi
+    echo "沒讀到 tof_front_mm，看一下 log 裡『距離感測器』相關訊息："
+    grep "距離感測器" "$LOG" | tail -5
 fi
 
 echo

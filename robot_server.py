@@ -21,6 +21,7 @@ API：
     GET  /state             遙測 JSON (位置、姿態、手臂、夾爪、距離、電量)
     GET  /frame.jpg         最新一張相機畫面 (JPEG)
     GET  /overhead.jpg      房間正上方俯視圖 (JPEG)，要先跑 add_overhead_camera.py
+    GET  /overhead_depth.png 俯視攝影機的深度圖 (16-bit PNG，每個像素是攝影機到該點的距離，單位 mm)
     GET  /actions           動作清單與安全上限
     POST /action            {"name": "...", "params": {...}}  一次只會執行一個
     POST /stop              緊急停止，不受動作鎖限制
@@ -62,6 +63,15 @@ LIMITS = {
 
 # 每次取畫面前要先等幾張新影格，用來沖掉解碼器裡的舊畫面。用 tools/measure_camera_lag.py 量過再調整。
 FRESH_FRAMES = int(os.environ.get("ROBOT_FRESH_FRAMES", "3"))
+
+
+def _cross3(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _norm3(v):
+    n = math.sqrt(sum(c * c for c in v)) or 1.0
+    return tuple(c / n for c in v)
 
 
 def _clamp(value, limit):
@@ -130,9 +140,12 @@ class RoboMasterBackend(object):
             print("[server] 取不到韌體版本 (可忽略)：", e)
 
         self._camera_ok = False
+        self._camera_fail_streak = 0
+        self._camera_live_ok = False
         try:
             self.ep.camera.start_video_stream(display=False)
             self._camera_ok = True
+            self._camera_live_ok = True
         except Exception as e:
             print("[server] 相機串流啟動失敗，Agent 會在沒有畫面的情況下運作：", e)
 
@@ -187,9 +200,73 @@ class RoboMasterBackend(object):
         return ""
 
     # ---- 真的距離感測器：繞過 RoboMaster SDK (它的 sensor.sub_distance 在這個模擬器裡
-    # 永遠回報 0，沒有實作)，直接用 CoppeliaSim 的 zmqRemoteApi 讀 add_proximity_sensors.py
-    # 建立的三個 proximity sensor (prox_front/prox_left/prox_right)。只有 sim 模式才有意義；
-    # 找不到套件或找不到感測器都只是印一行訊息、不影響其他功能。----
+    # 永遠回報 0，沒有實作)，直接用 CoppeliaSim 的 zmqRemoteApi 建立三個 proximity sensor
+    # (prox_front/prox_left/prox_right) 掛在機器人身上。只有 sim 模式才有意義；
+    # 找不到套件就只印一行訊息、不影響其他功能。----
+    #
+    # 實測抓到的 bug：sim.createProximitySensor() 是「模擬執行期間」建立的物件，模擬只要
+    # 被停止過一次（使用者手動、start_all.sh 偵測到停止幫忙按播放、或 _auto_recover() 自己
+    # 卡死自救時做的「停止再重啟模擬」）就會被整個清掉，但 _poll_prox_sensors() 以前是
+    # except Exception: pass，讀不到就當沒發生，tof_*_mm 永遠凍結在最後一次讀到的值
+    # （通常是 9999 = 沒偵測到東西）——機器人真的撞上/卡進東西時完全不會被發現，這正是
+    # 之前好幾次「log 顯示 tof 全部 9999、機器人卻明明卡死在球池邊界」的真正原因。
+    # 現在建立邏輯直接內建在 server 裡（不用再手動跑 add_proximity_sensors.py），
+    # 且偵測到連續讀取失敗就自動整批重建，作法跟 world_xy／前方相機是同一套。
+    _PROX_SPECS = [
+        ("prox_front", "fwd", 0.18, 0.00, 0.12, 0.60, 20),
+        ("prox_left", "left", 0.05, -0.14, 0.12, 0.35, 20),
+        ("prox_right", "right", 0.05, 0.14, 0.12, 0.35, 20),
+    ]
+
+    def _create_prox_sensors(self, sim, root):
+        """(重）建立三個距離感測器並掛到機器人身上。初次啟動跟 _poll_prox_sensors
+        發現物件被模擬重啟清掉時的重建，都走這條路徑。"""
+        yaw = None
+        t0 = time.time()
+        while time.time() - t0 < 3.0:
+            with self._tlock:
+                yaw = self.telemetry.get("yaw_deg")
+            if yaw is not None:
+                break
+            time.sleep(0.05)
+        if yaw is None:
+            yaw = 0.0
+            print("[server] 距離感測器校正：3 秒內沒等到 yaw telemetry，先用 0 度校正")
+
+        for h in sim.getObjectsInTree(root, sim.handle_all, 0):
+            if sim.getObjectAlias(h) in ("prox_front", "prox_left", "prox_right"):
+                sim.removeObjects([h])
+
+        rad = math.radians(yaw)
+        fwd = (math.cos(rad), math.sin(rad), 0.0)
+        right = (math.sin(rad), -math.cos(rad), 0.0)
+        up = (0.0, 0.0, 1.0)
+        root_pos = sim.getObjectPosition(root, sim.handle_world)
+
+        handles = {}
+        for name, dir_kind, along_fwd, along_right, height, rng, angle_deg in self._PROX_SPECS:
+            direction = {"fwd": fwd, "left": tuple(-v for v in right), "right": right}[dir_kind]
+            pos = [root_pos[i] + fwd[i] * along_fwd + right[i] * along_right + up[i] * height
+                   for i in range(3)]
+            z_axis = direction
+            x_axis = _norm3(_cross3(up, z_axis))
+            y_axis = _cross3(z_axis, x_axis)
+            m = [x_axis[0], y_axis[0], z_axis[0], pos[0],
+                 x_axis[1], y_axis[1], z_axis[1], pos[1],
+                 x_axis[2], y_axis[2], z_axis[2], pos[2]]
+            angle = math.radians(angle_deg)
+            far_size = 2 * rng * math.tan(angle / 2)
+            h = sim.createProximitySensor(
+                sim.proximitysensor_pyramid, 16, 4,
+                [4, 4, 4, 4, 0, 0, 0, 0],
+                [0.0, rng, 0.02, 0.02, far_size, far_size, 0.0, 0.0, 0.0, angle, 0.0, 0.0, 0.005, 0.0, 0.0])
+            sim.setObjectMatrix(h, m, sim.handle_world)
+            sim.setObjectAlias(h, name)
+            sim.setObjectParent(h, root, True)
+            handles[name] = h
+        print("[server] 距離感測器已建立（校正用 yaw=%.1f）：front/left/right" % yaw)
+        return handles
+
     def _start_prox_sensors(self):
         self._prox_handles = None
         if self.mode != "sim":
@@ -200,17 +277,10 @@ class RoboMasterBackend(object):
             root = sim.getObject("/RoboMaster", {"noError": True})
             if root == -1:
                 raise RuntimeError("找不到 /RoboMaster")
+            handles = self._create_prox_sensors(sim, root)
             tree = sim.getObjectsInTree(root, sim.handle_all, 0)
-            handles = {}
-            for h in tree:
-                alias = sim.getObjectAlias(h)
-                if alias in ("prox_front", "prox_left", "prox_right"):
-                    handles[alias] = h
-            missing = {"prox_front", "prox_left", "prox_right"} - set(handles)
-            if missing:
-                raise RuntimeError("缺少 %s，先跑 add_proximity_sensors.py" % sorted(missing))
         except Exception as e:
-            print("[server] 略過真實距離感測器（%s），tof_*_mm 不會出現在 /state" % e)
+            print("[server] 距離感測器建立失敗（%s），tof_*_mm 不會出現在 /state" % e)
             return
         self._sim_for_prox = sim
         self._prox_handles = handles
@@ -220,9 +290,11 @@ class RoboMasterBackend(object):
 
     def _poll_prox_sensors(self):
         field = {"prox_front": "tof_front_mm", "prox_left": "tof_left_mm", "prox_right": "tof_right_mm"}
-        sim = self._sim_for_prox
+        fail_streak = 0
         while True:
-            for alias, h in self._prox_handles.items():
+            sim = self._sim_for_prox
+            any_fail = False
+            for alias, h in list(self._prox_handles.items()):
                 try:
                     res, dist, _point, obj, _n = sim.readProximitySensor(h)
                     # 手臂/夾爪會動，姿勢不一樣時可能剛好掃到自己的手臂而不是真的外部障礙物，
@@ -231,26 +303,89 @@ class RoboMasterBackend(object):
                         res = 0
                     self._set(field[alias], int(dist * 1000) if res else 9999)
                 except Exception:
-                    pass
+                    any_fail = True
+            if not any_fail:
+                fail_streak = 0
+                time.sleep(0.1)
+                continue
+            fail_streak += 1
+            if fail_streak == 1 or fail_streak % 20 == 0:
+                print("[server] 距離感測器讀取失敗（連續第 %d 次，物件可能被模擬重啟清掉了）" % fail_streak)
+            if fail_streak >= 20:
+                print("[server] 距離感測器連續失敗 %d 次，嘗試重建..." % fail_streak)
+                try:
+                    root = sim.getObject("/RoboMaster", {"noError": True})
+                    if root == -1:
+                        raise RuntimeError("找不到 /RoboMaster")
+                    handles = self._create_prox_sensors(sim, root)
+                    tree = sim.getObjectsInTree(root, sim.handle_all, 0)
+                    self._prox_handles = handles
+                    self._robot_tree = set(tree) | {root}
+                    print("[server] 距離感測器已重建")
+                    fail_streak = 0
+                except Exception as e:
+                    print("[server] 距離感測器重建失敗：%s（2 秒後再試）" % e)
+                    time.sleep(2.0)
+                    continue
             time.sleep(0.1)
 
     # ---- 俯視攝影機：add_overhead_camera.py 建立的正交攝影機，給 agent 一個
     # locate_overhead(object) 動作，一次看到整個場地算方位角跟距離，不用靠自轉一步步搜索。
     # 同時把機器人「真的」世界座標 (world_xy) 放進 /state，因為 position_m 是相對 session
     # 開始時的座標、原點是任意的，跟俯視圖的世界座標系對不起來，agent 端要用 world_xy 換算。
+    def _connect_overhead_sim(self):
+        """(重）建立俯視攝影機用的 zmqRemoteApi 連線跟物件 handle。初次啟動跟
+        _poll_world_xy 發現連線壞掉時的重連，都走這條路徑，避免兩邊各寫一份。"""
+        from coppeliasim_zmqremoteapi_client import RemoteAPIClient
+        sim = RemoteAPIClient().require("sim")
+        h = sim.getObject("/overhead_cam", {"noError": True})
+        if h == -1:
+            raise RuntimeError("找不到 overhead_cam，先跑 add_overhead_camera.py")
+        root = sim.getObject("/RoboMaster", {"noError": True})
+        if root == -1:
+            raise RuntimeError("找不到 /RoboMaster")
+        return sim, h, root
+
+    # 場景裡不會動的主要結構地標——名字是 build_playground_new.py 建場景時取的別名，
+    # 直接查詢目前這個場景的真實世界座標（不是照抄腳本裡的 POS 字典），這樣不管實際
+    # 載入的是哪個變體、座標有沒有跟腳本不一樣，都保證跟眼前這個場景一致。查不到的
+    # 就跳過，不影響其他地標。刻意只列大型結構（隧道/球池/柱子/平台/長椅/收納箱），
+    # 不含地墊、裝飾泡棉、可拾取的小積木/球——後者位置會被任務移動，寫死進地圖只會
+    # 誤導 agent；地墊則太扁、太容易跟任務目標搞混。
+    _STATIC_LANDMARK_ALIASES = [
+        "tunnel", "ball_pit", "bench", "bin_balls", "bin_blocks", "platform",
+        "pillar_red", "pillar_blue", "pillar_yellow", "pillar_green", "stairs", "slide",
+    ]
+
+    def _query_static_landmarks(self, sim):
+        landmarks = {}
+        all_objs = sim.getObjectsInTree(sim.handle_scene, sim.handle_all, 0)
+        by_alias = {}
+        for h in all_objs:
+            try:
+                by_alias.setdefault(sim.getObjectAlias(h), h)
+            except Exception:
+                pass
+        for name in self._STATIC_LANDMARK_ALIASES:
+            h = by_alias.get(name)
+            if h is None:
+                continue
+            try:
+                p = sim.getObjectPosition(h, sim.handle_world)
+                landmarks[name] = (round(p[0], 2), round(p[1], 2))
+            except Exception:
+                pass
+        if landmarks:
+            print("[server] 靜態地標已建立：%s" % ", ".join(sorted(landmarks)))
+        return landmarks
+
     def _start_overhead_cam(self):
         self._overhead_handle = None
+        self._static_landmarks_xy = {}
         if self.mode != "sim":
             return
         try:
-            from coppeliasim_zmqremoteapi_client import RemoteAPIClient
-            sim = RemoteAPIClient().require("sim")
-            h = sim.getObject("/overhead_cam", {"noError": True})
-            if h == -1:
-                raise RuntimeError("找不到 overhead_cam，先跑 add_overhead_camera.py")
-            root = sim.getObject("/RoboMaster", {"noError": True})
-            if root == -1:
-                raise RuntimeError("找不到 /RoboMaster")
+            sim, h, root = self._connect_overhead_sim()
         except Exception as e:
             print("[server] 略過俯視攝影機（%s），/overhead.jpg 跟 world_xy 不會出現" % e)
             return
@@ -258,18 +393,42 @@ class RoboMasterBackend(object):
         self._sim_for_overhead_lock = threading.Lock()
         self._overhead_handle = h
         self._overhead_root = root
+        self._static_landmarks_xy = self._query_static_landmarks(sim)
         threading.Thread(target=self._poll_world_xy, daemon=True).start()
         print("[server] 俯視攝影機已連上：/overhead.jpg")
 
     def _poll_world_xy(self):
-        sim = self._sim_for_overhead
+        # 這裡以前是 except Exception: pass：sim.getObjectPosition() 只要噴一次例外，
+        # world_xy 就會從此凍結在最後一次成功讀到的值，thread 不會死、也不會印任何東西，
+        # 表面上一切正常，agent 端卻整段任務都在用過時座標算方位角/距離。實測真的發生過，
+        # 一次跑分 42 步裡有 30 幾步 world_xy 完全沒變。現在失敗會印出來，連續失敗夠多次
+        # （0.1s 一次、20 次≈2 秒）就整個重建連線跟 handle，不是原地卡死等下一次奇蹟。
+        fail_streak = 0
         while True:
             try:
                 with self._sim_for_overhead_lock:
+                    sim = self._sim_for_overhead
                     p = sim.getObjectPosition(self._overhead_root, sim.handle_world)
                 self._set("world_xy", [round(p[0], 3), round(p[1], 3)])
-            except Exception:
-                pass
+                fail_streak = 0
+            except Exception as e:
+                fail_streak += 1
+                if fail_streak == 1 or fail_streak % 20 == 0:
+                    print("[server] world_xy 讀取失敗（連續第 %d 次）：%s" % (fail_streak, e))
+                if fail_streak >= 20:
+                    print("[server] world_xy 連續失敗 %d 次，嘗試重建俯視攝影機連線..." % fail_streak)
+                    try:
+                        sim, h, root = self._connect_overhead_sim()
+                        with self._sim_for_overhead_lock:
+                            self._sim_for_overhead = sim
+                            self._overhead_handle = h
+                            self._overhead_root = root
+                        print("[server] 俯視攝影機連線已重建，world_xy 恢復更新。")
+                        fail_streak = 0
+                    except Exception as reconnect_err:
+                        print("[server] 重建俯視攝影機連線失敗：%s（2 秒後再試）" % reconnect_err)
+                        time.sleep(2.0)
+                        continue
             time.sleep(0.1)
 
     def overhead_jpeg(self, quality=80):
@@ -287,6 +446,26 @@ class RoboMasterBackend(object):
             arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
             ok, buf = cv2.imencode(".jpg", arr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
             return buf.tobytes() if ok else None
+        except Exception:
+            return None
+
+    def overhead_depth_png(self):
+        # sim.getVisionSensorDepth 的 options bit0=1 代表直接回傳「公尺」，不用自己拿
+        # near/far clipping plane 去反推真實距離——這樣就算之後改了 add_overhead_camera.py
+        # 的攝影機高度或視野範圍，這裡也不用跟著改。編碼成 16-bit PNG、單位 mm：
+        # uint16 上限 65535mm (65.5m) 遠超過場地範圍，1mm 解析度綽綽有餘，跟專案裡其他
+        # 量測 (arm_mm、tof_*_mm) 用同一種單位，agent 端不用再做單位轉換。
+        # 翻轉方向跟 overhead_jpeg 的 cv2.flip(arr, 0) 保持一致，兩張圖的像素座標系才會對得上。
+        if not self._overhead_handle or cv2 is None:
+            return None
+        try:
+            with self._sim_for_overhead_lock:
+                buf, res = self._sim_for_overhead.getVisionSensorDepth(self._overhead_handle, 1)
+            arr = np.frombuffer(buf, dtype=np.float32).reshape(res[1], res[0])
+            arr = cv2.flip(arr, 0)
+            mm = np.clip(arr * 1000.0, 0, 65535).astype(np.uint16)
+            ok, out = cv2.imencode(".png", mm)
+            return out.tobytes() if ok else None
         except Exception:
             return None
 
@@ -337,7 +516,27 @@ class RoboMasterBackend(object):
             # 這個模擬器的 SDK ToF 永遠回報 0，有真的 prox 讀值時就不要一起丟出去混淆。
             data.pop("tof_distance_mm", None)
         data["mode"] = self.mode
-        data["camera"] = self._camera_ok
+        # _camera_ok 只代表「啟動時初始化成功」；_camera_live_ok 才是「最近真的抓得到新畫面」——
+        # SDK 的解碼 thread 死掉時前者不會變，後者才會誠實反映前方相機其實已經瞎了。
+        data["camera"] = self._camera_ok and self._camera_live_ok
+        # 場景裡不會動的地標，換算成跟 locate_overhead()/align_to_tunnel() 同一種「距離 +
+        # 該轉幾度面向它」格式，讓 agent 不用每次都呼叫 locate_overhead 才知道隧道/球池
+        # 在哪——省下的是「感知這種東西在哪」的步驟，不是叫它跳過移動或對齊的驗證。
+        # 公式（world_xy 的 y 軸要反過來才跟 yaw_deg 同一個座標系）跟 perception.py 的
+        # locate_overhead 完全一樣，已經對過真實移動資料校正過。
+        world_xy = data.get("world_xy")
+        yaw = data.get("yaw_deg")
+        if self._static_landmarks_xy and world_xy is not None and yaw is not None:
+            rx, ry = world_xy
+            landmarks = {}
+            for name, (lx, ly) in self._static_landmarks_xy.items():
+                vx = lx - rx
+                vy = -(ly - ry)
+                dist = math.hypot(vx, vy)
+                bearing = math.degrees(math.atan2(vy, vx))
+                turn_left = (bearing - yaw + 180) % 360 - 180
+                landmarks[name] = {"distance_m": round(dist, 2), "turn_left_deg": round(turn_left, 1)}
+            data["static_landmarks"] = landmarks
         return data
 
     def _fresh_image(self, raw=False):
@@ -364,14 +563,50 @@ class RoboMasterBackend(object):
         try:
             img = self._fresh_image(raw)
         except Exception:
-            return None
+            img = None
         if img is None:
+            self._note_camera_fail()
             return None
+        self._camera_fail_streak = 0
+        self._camera_live_ok = True
+        # 實測證實：這個模擬器的前方相機串流是左右鏡像的——送一個遙測證實為真的
+        # 「往左轉 20 度」（yaw telemetry 確實 +22.4 度），畫面裡的東西卻往左滑、
+        # 新東西從右邊冒出來，物理上正確的左轉應該是東西往右滑。這個鏡像會讓
+        # perception.py 算出來的 bearing_right_deg／turn_left_deg 全部反著指，
+        # locate/face 每次「轉過去對準」都會往錯的方向轉，正是好幾次任務卡在
+        # 反覆對不準、東西轉一轉就不見的根本原因。這裡翻正，之後 perception.py
+        # 的公式不用再改，直接假設畫面已經是正常方向就對了。
+        img = cv2.flip(img, 1)
         h, w = img.shape[:2]
         if w > width:
             img = cv2.resize(img, (width, int(h * width / float(w))))
         ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
         return buf.tobytes() if ok else None
+
+    def _note_camera_fail(self):
+        # 實測發現：跑分一開始連續呼叫 /stop 會打斷 SDK 正在解碼中的 H.264 串流，讓底層
+        # av 解碼器噴 InvalidDataError，直接把 robomaster SDK 自己的 _video_decoder_task
+        # thread 弄死，而且沒有任何重啟機制——一次跑分裡 48 步只有第 1 步有前方畫面，
+        # 剩下 47 步全部悄悄退化成只剩俯視圖，state() 的 camera 欄位卻全程回報 true，
+        # agent 完全不知道自己「瞎了」。現在連續失敗夠多次就重啟 video stream，
+        # 且 camera 欄位會誠實反映「最近有沒有真的抓到新畫面」，不是只看有沒有初始化成功。
+        self._camera_fail_streak += 1
+        if self._camera_fail_streak == 1 or self._camera_fail_streak % 5 == 0:
+            print("[server] 前方相機讀不到新畫面（連續第 %d 次）" % self._camera_fail_streak)
+        if self._camera_fail_streak >= 3:
+            self._camera_live_ok = False
+        if self._camera_fail_streak == 3 or (self._camera_fail_streak > 3 and self._camera_fail_streak % 10 == 0):
+            print("[server] 前方相機連續失敗 %d 次，嘗試重啟 video stream..." % self._camera_fail_streak)
+            try:
+                self.ep.camera.stop_video_stream()
+            except Exception:
+                pass
+            try:
+                self.ep.camera.start_video_stream(display=False)
+                print("[server] video stream 已重啟，等下一次讀取確認是否恢復")
+                self._camera_fail_streak = 0
+            except Exception as e:
+                print("[server] video stream 重啟失敗：%s" % e)
 
     # ---- 動作 ----
     def stop(self):
@@ -428,6 +663,27 @@ class RoboMasterBackend(object):
             result["message"] += self._note_stall(stalled)
         except Exception:
             pass
+
+        # 診斷用（先不動任何行為）：懷疑 timeout 當下 self.stop() 雖然有發，但車身撞到東西
+        # 之後的殘餘動能／SDK 位置控制指令沒被速度控制乾淨蓋掉，還要再幾秒才會真的停穩——
+        # 實測發現：這裡回報「已經停了」之後，下一步就算是純感知動作 (不會再送任何底盤指令)，
+        # 姿態還是繼續在變。這裡不改變 0.6 秒的既有邏輯，只是在 timeout 之後多花幾秒把「是不是
+        # 真的還在動」的過程印出來，確認了再決定要拉長 sleep 還是改成輪詢等穩定。
+        if not result.get("ok") and "timed out" in result.get("message", ""):
+            try:
+                print("[server] move_chassis timeout，量測停穩過程（是不是還在自己動）...")
+                last = after
+                for i in range(5):
+                    time.sleep(0.5)
+                    cur = self.state()
+                    dyaw2 = (cur["yaw_deg"] - last["yaw_deg"] + 180) % 360 - 180
+                    dpos2 = math.hypot(cur["position_m"]["x"] - last["position_m"]["x"],
+                                        cur["position_m"]["y"] - last["position_m"]["y"])
+                    print("[server]   +%.1fs 後：yaw %+.1f -> %+.1f (Δ%.1f 度)，position 變化 %.3fm" %
+                          ((i + 1) * 0.5, last["yaw_deg"], cur["yaw_deg"], dyaw2, dpos2))
+                    last = cur
+            except Exception as e:
+                print("[server] 停穩過程量測失敗（不影響本次動作結果）：%s" % e)
         return result
 
     def _act_move_chassis(self, p):
@@ -745,6 +1001,11 @@ def make_handler(backend, token):
                 if jpg is None:
                     return self._send(503, {"ok": False, "message": "no overhead camera available"})
                 return self._send(200, jpg, "image/jpeg")
+            if path == "/overhead_depth.png":
+                png = backend.overhead_depth_png() if hasattr(backend, "overhead_depth_png") else None
+                if png is None:
+                    return self._send(503, {"ok": False, "message": "no overhead depth available"})
+                return self._send(200, png, "image/png")
             return self._send(404, {"ok": False, "message": "not found"})
 
         def do_POST(self):
