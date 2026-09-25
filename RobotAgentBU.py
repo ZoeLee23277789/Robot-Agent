@@ -26,7 +26,15 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from browser_use.agent.service import Agent
+# 這支程式只在本機控制機器人，不使用 browser_use 的任何雲端/對外服務：關掉它預設會開的
+# posthog 匿名遙測 (ANONYMIZED_TELEMETRY)、cloud sync (BROWSER_USE_CLOUD_SYNC，預設跟著
+# 遙測一起開)，以及每次啟動都去 PyPI 查新版的檢查 (BROWSER_USE_VERSION_CHECK，見
+# browser_use/utils.py)。必須在 import browser_use 之前設定，CONFIG 是讀取當下才看環境變數。
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
+os.environ.setdefault("BROWSER_USE_CLOUD_SYNC", "false")
+os.environ.setdefault("BROWSER_USE_VERSION_CHECK", "false")
+
+from browser_use.agent.service import Agent  # noqa: E402
 
 from robot_agent import bu_tools
 from robot_agent.bu_common import AdapterState, make_on_step_start
@@ -94,7 +102,7 @@ async def amain() -> None:
 
     health = await robot.health()
     if not health.get("ok"):
-        raise SystemExit(f"❌ {health.get('message')}\n   請先在機器人那一端執行：python robot_server.py --mode sim")
+        raise SystemExit(f"❌ {health.get('message')}\n   請先在機器人那一端執行：./start_all.sh（或 ./start_server.sh sim）")
     check_link(health)
     mode = health.get("mode", "?")
     confirm = args.confirm if args.confirm is not None else (mode == "real")

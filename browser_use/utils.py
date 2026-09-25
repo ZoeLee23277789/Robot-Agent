@@ -585,6 +585,10 @@ async def check_latest_browser_use_version() -> str | None:
 	Returns:
 		The latest version string if successful, None if failed
 	"""
+	# 這份 vendor 進 RoboMaster agent 的版本：本機控制機器人時不該對外連 PyPI 查版本，
+	# BROWSER_USE_VERSION_CHECK=false 就直接跳過（RobotAgentBU.py 會預設關掉）。
+	if os.getenv('BROWSER_USE_VERSION_CHECK', 'true').lower()[:1] not in 'ty1':
+		return None
 	try:
 		async with httpx.AsyncClient(timeout=3.0) as client:
 			response = await client.get('https://pypi.org/pypi/browser-use/json')

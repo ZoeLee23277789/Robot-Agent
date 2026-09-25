@@ -104,7 +104,12 @@ def parse_points(text: str) -> list:
 
 def _height_above_floor_m(depth_png: bytes, x_norm: int, y_norm: int) -> Optional[float]:
     """從 /overhead_depth.png 查詢正規化座標 (0-1000，跟 pointing 回傳的座標系一致) 那個點
-    離地面多高。取點周圍一小塊區域的中位數，避免邊緣單一像素的雜訊或反鋸齒誤差。"""
+    離地面多高。取點周圍一小塊區域，回報其中「離攝影機最近的那 15% 像素」的高度：
+    以前取中位數，實測對 8 cm 的球會誤判成平面——深度圖 512 px 涵蓋 7 m、一個像素約
+    1.4 cm，7x7 區塊約 9.6 cm 寬，球的投影只佔區塊一半左右，pointing 偏 1-2 個像素就有
+    過半是地板，中位數必然落在地板上，agent 因此把找對的球當成地墊丟掉（連續兩次跑分
+    都發生）。用低百分位的距離 (= 高百分位的高度) 只要有幾個像素落在物體上就判得出來，
+    又不像 min 那樣被單一雜訊像素騙。"""
     arr = cv2.imdecode(np.frombuffer(depth_png, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
     if arr is None:
         return None
@@ -115,7 +120,7 @@ def _height_above_floor_m(depth_png: bytes, x_norm: int, y_norm: int) -> Optiona
     patch = patch[patch > 0]  # 0 代表深度讀取失敗/超出範圍，排除掉
     if patch.size == 0:
         return None
-    distance_m = float(np.median(patch)) / 1000.0
+    distance_m = float(np.percentile(patch, 15)) / 1000.0
     return OVERHEAD_CAMERA_HEIGHT_M - distance_m
 
 
