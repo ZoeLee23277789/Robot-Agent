@@ -56,6 +56,11 @@ sim = RemoteAPIClient().require('sim')
 if sim.getSimulationState() == sim.simulation_stopped:
     print('模擬是停止狀態，幫你按下播放... [SIM_WAS_STOPPED]')
     sim.startSimulation()
+# 場景裡若有不只一台 RoboMaster（實測踩過：多一台被拆過的複製品排在前面），感測器會掛錯車。
+# robot_server.py 會自己挑有 GyroSensor 的那台，但起點位置還是要靠人把多餘的刪掉並存檔。
+n = sum(1 for o in sim.getObjectsInTree(sim.handle_scene, sim.handle_all, 2) if sim.getObjectAlias(o) == 'RoboMaster')
+if n != 1:
+    print('!! 場景裡有 %d 台 RoboMaster 模型，請在 CoppeliaSim 刪掉多餘的那台（沒有 GyroSensor 的）並存檔 [DUP_ROBOT]' % n)
 " 2>&1); then
     if [ -n "$SIM_OUT" ]; then echo "$SIM_OUT"; fi
     echo "連不上 CoppeliaSim（8 秒沒回應）。請先手動：開啟 CoppeliaSim → 載入你的場景，再重跑這支腳本。"

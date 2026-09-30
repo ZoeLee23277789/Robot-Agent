@@ -25,14 +25,20 @@ class TaskMetrics:
     total_distance_m: float   # 機器人專屬：下令的總平移距離，可以拿來比較路徑效率
     is_successful: bool
     run_dir: str = ""
+    judge_overruled: bool = False  # judge 判敗、但所有 milestone 都已由遙測證實通過，最終仍算成功
 
 
 def create_task_metrics(task: dict, history: dict, milestones: list[MilestoneResult], judgement: dict) -> TaskMetrics:
     total = len(milestones)
     done = sum(1 for m in milestones if m.passed)
     verdict = judgement.get("verdict")
-    # 跟原本一樣：judge 的裁決優先；沒有裁決時，退回用 milestone 全過當作成功
-    success = verdict if verdict is not None else (total > 0 and done == total)
+    # judge 的裁決優先；沒有裁決時，退回用 milestone 全過當作成功。
+    # 例外：所有 milestone 都是「遙測」直接證實通過（例如夾爪狀態、yaw 變化這種量得到的事實），
+    # judge 就不能只憑影像或里程計雜訊否決——實測 gpt-4o judge 曾因 3 mm 的里程計漂移把一個
+    # 動作完全正確的 e08 判成「底盤動了」。這種情況記成成功並標記 judge_overruled，方便事後複核。
+    telemetry_all_passed = total > 0 and all(m.passed and m.method in ("telemetry", "report") for m in milestones)
+    overruled = verdict is False and telemetry_all_passed
+    success = True if overruled else (verdict if verdict is not None else (total > 0 and done == total))
 
     steps = history.get("steps", [])
     errors = sum(1 for s in steps if s.get("error") or any(not a["ok"] for a in s.get("actions", [])))
@@ -48,7 +54,7 @@ def create_task_metrics(task: dict, history: dict, milestones: list[MilestoneRes
         judge_failure_reason=judgement.get("failure_reason"),
         total_steps=len(steps), total_duration_seconds=float(history.get("duration_s", 0.0)),
         error_count=errors, total_distance_m=round(dist, 2), is_successful=bool(success),
-        run_dir=history.get("run_dir", ""),
+        run_dir=history.get("run_dir", ""), judge_overruled=overruled,
     )
 
 

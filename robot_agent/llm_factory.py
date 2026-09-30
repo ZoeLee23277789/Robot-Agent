@@ -1,5 +1,5 @@
 """
-LLM 工廠。直接重用 repo 裡 browser_use/llm 的 Chat 類別，
+LLM 工廠。直接重用 robot_agent/llm 的 Chat 類別，
 所以 provider 的切換方式、structured output 的處理都跟原本的 Adobe Express Agent 一樣。
 """
 
@@ -19,7 +19,7 @@ class _TruncateFilter(logging.Filter):
 
 
 def _quiet_logs() -> None:
-    for name in ("", "browser_use"):
+    for name in ("", "robot_agent"):
         for h in logging.getLogger(name).handlers:
             if not any(isinstance(f, _TruncateFilter) for f in h.filters):
                 h.addFilter(_TruncateFilter())
@@ -48,18 +48,18 @@ def build_llm(provider: str, model: Optional[str] = None):
     _quiet_logs()
 
     if provider == "openai":
-        from browser_use.llm.openai.chat import ChatOpenAI
+        from robot_agent.llm.openai.chat import ChatOpenAI
         return ChatOpenAI(model=model, api_key=_need("OPENAI_API_KEY"))
     if provider == "anthropic":
-        from browser_use.llm.anthropic.chat import ChatAnthropic
+        from robot_agent.llm.anthropic.chat import ChatAnthropic
         return ChatAnthropic(model=model, api_key=_need("ANTHROPIC_API_KEY"))
     if provider in ("google", "gemini"):
-        from browser_use.llm.google.chat import ChatGoogle
+        from robot_agent.llm.google.chat import ChatGoogle
         return ChatGoogle(model=model, api_key=_need("GOOGLE_API_KEY"))
     if provider in ("robotics-er", "gemini-er", "er"):
         # Gemini Robotics ER：Google 專門為機器人做的 embodied reasoning 模型，走的是同一套 Gemini API。
         # 官方建議 thinking level 用 medium 兼顧延遲與準確度；這個模型是 Gemini 3 系列，temperature 維持預設的 1.0。
-        from browser_use.llm.google.chat import ChatGoogle
+        from robot_agent.llm.google.chat import ChatGoogle
         level = os.getenv("ROBOT_THINKING_LEVEL", "medium").lower()
         return ChatGoogle(
             model=model, api_key=_need("GOOGLE_API_KEY"), temperature=1.0,
@@ -72,10 +72,10 @@ def build_llm(provider: str, model: Optional[str] = None):
             config={"thinking_config": {"thinking_level": level}},
         )
     if provider == "ollama":
-        from browser_use.llm.ollama.chat import ChatOllama
+        from robot_agent.llm.ollama.chat import ChatOllama
         return ChatOllama(model=model)
     if provider == "mlx":
         # 跟 Agent.py 相同：MLX 走 OpenAI 相容伺服器
-        from browser_use.llm.openai.chat import ChatOpenAI
+        from robot_agent.llm.openai.chat import ChatOpenAI
         return ChatOpenAI(base_url=os.getenv("MLX_BASE_URL", "http://localhost:8000/v1"), api_key="none", model=model)
     raise ValueError(f"Unsupported provider: {provider}")

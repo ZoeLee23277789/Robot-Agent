@@ -17,7 +17,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
+from robot_agent.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, UserMessage
 
 # 相機水平視角 (度)。實體 EP 的鏡頭是 120 度廣角；模擬器的值不一定相同，用 tools/calibrate_fov.py 量出來再填。
 CAMERA_HFOV_DEG = float(os.getenv("ROBOT_CAMERA_HFOV", "100"))

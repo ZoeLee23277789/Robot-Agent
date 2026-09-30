@@ -36,8 +36,8 @@ ROOM = 6.0
 WALL_T = 0.05
 WALL_H = 0.60
 DOOR_X, DOOR_W = -1.5, 0.8
-ROBOT_START = (-0.6, -2.3)
-ROBOT_HEADING = math.pi / 2
+ROBOT_START = (-1.1, -2.51)   # 靠南牆入口，兩根柱子之間（2026-09-26 依實際使用的擺位更新，原本是 (-0.6, -2.3)）
+ROBOT_HEADING = 0.0           # 面向 +x（原本是 math.pi / 2，面向 +y）
 TILE = 0.75
 GROUND = 10.0
 

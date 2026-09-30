@@ -34,5 +34,8 @@ captures/
 .vscode/
 *.swp
 
-# 換成真的 browser_use 套件之前的舊版備份，純粹保險用，不進版控
-browser_use_stub_backup_do_not_commit/
+# 舊版套件備份目錄，純粹保險用，不進版控
+*_stub_backup_do_not_commit/
+# 從 robot_agent/core/ 移除的第三方原始檔備份與本機壓縮檔（本機保留，不上傳）
+robomaster_removed_core/
+*.zip

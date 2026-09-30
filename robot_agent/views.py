@@ -1,10 +1,10 @@
 """
 Agent 的輸出格式。
-結構刻意跟 browser_use 的 AgentOutput 對齊 (thinking / evaluation / memory / next_goal / action[])，
+結構刻意跟 通用 agent 框架的 AgentOutput 對齊 (thinking / evaluation / memory / next_goal / action[])，
 這樣原本評估 GUI agent 用的 step 紀錄與 checkpoint 判定邏輯可以直接沿用。
 
 動作的參數 model 跟 RobotAction (給 LLM 看的 action union) 都搬到 actions.py 了，
-那邊是動態從 ACTION_SPECS registry 長出來的，對應 browser_use 的 Tools()——這裡繼續
+那邊是動態從 ACTION_SPECS registry 長出來的，對應 通用 agent 框架的 Tools()——這裡繼續
 re-export RobotAction，是因為 RobotAgentOutput.action 需要用到它，其他地方要用action
 相關的東西應該直接 import robot_agent.actions。
 """
@@ -30,7 +30,7 @@ class RobotAgentOutput(BaseModel):
 
 
 # ---- 動作執行結果 ----
-# 對應 browser_use 的 ActionResult：每個 handler 執行完不直接寫歷史紀錄，而是回報
+# 對應 通用 agent 框架的 ActionResult：每個 handler 執行完不直接寫歷史紀錄，而是回報
 # 「發生了什麼」，由 _execute 統一決定要不要記錄失敗、要不要中斷這一步、要不要更新
 # world_state。這樣「一個動作結果該如何影響 agent 的狀態」只有一個地方在決定，
 # 不會散落在每個 handler 裡各自判斷。
@@ -48,6 +48,8 @@ class ActionResult(BaseModel):
     recovered: bool = False
     # 這個結果出來後，這一步還要不要繼續跑下一個動作 (True = 這一步到此為止)。
     stop_step: bool = True
+    # 技能（pick/place）執行途中的遙測快照，讓 judge 看得到「夾爪開過」這種中途狀態
+    state_trace: list[dict[str, Any]] = []
 
 
 # ---- 紀錄用 ----
@@ -59,6 +61,13 @@ class ActionRecord(BaseModel):
     duration_s: float = 0.0
     counts_as_failure: bool = True
     resets_streak: bool = False
+    # 這個動作執行完當下的遙測。一步可以有最多三個動作（例如「開夾爪、等、關夾爪」），只靠每步開頭的
+    # state_before 會完全看不到中間的狀態——實測 e08 因此被判「夾爪從來沒開過」。
+    state_after: Optional[dict[str, Any]] = None
+    # 技能途中的遙測快照（pick：張開/關上/抬起；place：定位/釋放），judge 的遙測判定一起看
+    state_trace: list[dict[str, Any]] = []
+    # pick/place 之後手臂放低拍的證據影格（夾爪裡的物件 / 放下的物件），judge 會一起看
+    evidence_frame_path: Optional[str] = None
 
 
 class StepRecord(BaseModel):
@@ -89,7 +98,7 @@ class RunResult(BaseModel):
     latest_plan: str = ""
     long_term_summary: str = ""
 
-    # ---- 對應 browser_use 的 AgentHistoryList 便利方法 ----
+    # ---- 對應 通用 agent 框架的 AgentHistoryList 便利方法 ----
     def is_successful(self) -> Optional[bool]:
         """任務還沒 done 就沒有答案，回傳 None (不是 False)，避免跟「明確失敗」混淆。"""
         return self.success if self.is_done else None

@@ -8,15 +8,17 @@ Milestone 判定與任務裁決。
     3. 其餘 milestone 和整體成敗交給 judge LLM，一次呼叫判完，用 structured output 取代手動解析 JSON
 """
 
+import asyncio
 import base64
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, SystemMessage, UserMessage
+from robot_agent.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, SystemMessage, UserMessage
 
 
 @dataclass
@@ -49,7 +51,19 @@ JUDGE_SYSTEM = (
     "and the final camera image. Decide from EVIDENCE only. The agent's own claims (its memory, its final report, "
     "'ok' action results) are not evidence; camera images and telemetry are. "
     "A milestone passes if it was true at any point of the run, unless it describes the end state. "
-    "task_success is true only if the user's request is fully satisfied at the end of the run."
+    "task_success is true only if the user's request is fully satisfied at the end of the run. "
+    "Odometry noise: position_m drifts by a few millimetres and yaw_deg by up to about 3 degrees even when the chassis "
+    "never moves; changes below 0.03 m or 3 degrees are sensor noise, never evidence of movement. To decide whether the "
+    "chassis moved, use world_xy (real world coordinates) and whether any move_chassis action was actually executed. "
+    "Milestones already settled by telemetry are facts; do not contradict them. "
+    "Images labelled 'overhead camera' come from a fixed camera above the room looking straight down; the robot "
+    "itself appears in them from above. An object that is visible there, or that the log shows was located from "
+    "the overhead camera with world coordinates, counts as seen/found for milestones about seeing or locating it. "
+    "The step log lists, from telemetry, which fixed landmarks (pillars, tunnel, ball pit, ...) were inside the front "
+    "camera's field of view at each step; treat that as ground truth for what was visible when, e.g. for scan/order tasks. "
+    "The image sample may not include every step: if the step log shows an action that would plausibly have produced "
+    "the evidence at a step whose image is not shown, say so in your reasoning instead of treating the missing image as "
+    "proof that it never happened."
 )
 
 
@@ -88,7 +102,16 @@ def check_telemetry(milestone: dict, history: dict) -> Optional[MilestoneResult]
     field, when = cond["field"], cond.get("when", "any")
     final = history.get("final_state") or {}
     steps = history.get("steps", [])
-    states = [(s["step"], s.get("state_before") or {}) for s in steps]
+    states = []
+    for s in steps:
+        states.append((s["step"], s.get("state_before") or {}))
+        # 每個動作之後的遙測也算：一步裡「開夾爪、等、關夾爪」三個動作，只看步驟開頭永遠看不到「開著」的狀態
+        for i, a in enumerate(s.get("actions", [])):
+            # 技能（pick/place）途中的快照也算：夾爪「開著」只在技能執行到一半時看得到
+            for k, tr in enumerate(a.get("state_trace") or []):
+                states.append((f"{s['step']}.{i + 1} ({tr.get('trace_tag', 'trace %d' % k)})", tr))
+            if a.get("state_after"):
+                states.append((f"{s['step']}.{i + 1}", a["state_after"]))
     states.append((None, final))
     if all(_get(st, field) is None for _, st in states):
         return None
@@ -128,7 +151,7 @@ def check_telemetry(milestone: dict, history: dict) -> Optional[MilestoneResult]
     candidates = [(None, final)] if when == "final" else states
     for step, st in candidates:
         if _match(relval(st), cond):
-            where = "final state" if step is None else f"before step {step}"
+            where = "final state" if step is None else (f"after action {step}" if isinstance(step, str) else f"before step {step}")
             shown = relval(st) if cond.get("relative_to_start") else _get(st, field)
             return MilestoneResult(milestone["id"], milestone["description"], True, "telemetry",
                                    f"{field}={shown} at {where}" +
@@ -139,10 +162,67 @@ def check_telemetry(milestone: dict, history: dict) -> Optional[MilestoneResult]
 
 
 # ---------------------------------------------------------------- LLM judge
+def _landmarks_in_view(state: dict, half_fov_deg: float = 45.0) -> str:
+    """從遙測算出這一步相機視野內有哪些固定地標（|turn_left| 在半視角內），給 judge 當客觀證據——
+    judge 只抽樣看部分畫面，光靠影像常把「掃描時依序看到什麼」判錯（實測 e07）。"""
+    lm = (state or {}).get("static_landmarks") or {}
+    seen = [f"{n} ({v['turn_left_deg']:+.0f} deg, {v['distance_m']:.1f} m)" for n, v in sorted(lm.items())
+            if isinstance(v, dict) and abs(v.get("turn_left_deg", 999)) <= half_fov_deg]
+    return ", ".join(seen) if seen else "(none of the fixed landmarks)"
+
+
+def _all_states(history: dict) -> list:
+    out = []
+    for s in history.get("steps", []):
+        out.append(s.get("state_before") or {})
+        for a in s.get("actions", []):
+            out.extend(a.get("state_trace") or [])
+            if a.get("state_after"):
+                out.append(a["state_after"])
+    out.append(history.get("final_state") or {})
+    return out
+
+
+def check_report(milestone: dict, history: dict) -> Optional[MilestoneResult]:
+    """report 型 milestone（確定性的，不用 LLM）：
+    regex           最終報告要符合的正規表示式（例如「四種顏色」這種有標準答案的題）。
+    landmark_order  掃描類任務：用遙測（每一步/每個動作後的 static_landmarks 方位角）推算固定地標「依序進入
+                    相機視野」的順序，對照報告裡對應顏色詞第一次出現的順序；judge 只抽樣看部分畫面，
+                    光靠影像判這種順序實測會判錯（e07：agent 回報的順序其實是對的）。"""
+    cond = milestone.get("report")
+    if not cond:
+        return None
+    text = history.get("final_text") or ""
+    if cond.get("regex"):
+        ok = re.search(cond["regex"], text, re.I) is not None
+        return MilestoneResult(milestone["id"], milestone["description"], ok, "report",
+                               f"final report {'matches' if ok else 'does not match'} /{cond['regex']}/: {text[:120]!r}")
+    if cond.get("landmark_order"):
+        names = cond["landmark_order"]
+        half = float(cond.get("half_fov_deg", 45.0))
+        seen = []
+        for st in _all_states(history):
+            lm = st.get("static_landmarks") or {}
+            for n in names:
+                v = lm.get(n)
+                if isinstance(v, dict) and abs(v.get("turn_left_deg", 999)) <= half and n not in seen:
+                    seen.append(n)
+        low = text.lower()
+        reported = sorted(((low.find(n.split("_")[-1]), n) for n in names if n.split("_")[-1] in low))
+        reported = [n for _, n in reported]
+        ok = len(seen) >= int(cond.get("min_seen", 1)) and reported == seen
+        return MilestoneResult(milestone["id"], milestone["description"], ok, "report",
+                               f"telemetry says the landmarks entered the camera view in this order: {seen}; "
+                               f"the report lists them as: {reported}")
+    return None
+
+
 def _step_log(history: dict) -> str:
     lines = []
     for s in history.get("steps", []):
         lines.append(f"[step {s['step']}] telemetry={json.dumps(s.get('state_before', {}))}")
+        lines.append(f"  fixed landmarks inside the front camera's field of view at this step (from telemetry): "
+                     f"{_landmarks_in_view(s.get('state_before'))}")
         if s.get("error"):
             lines.append(f"  error: {s['error']}")
             continue
@@ -150,28 +230,44 @@ def _step_log(history: dict) -> str:
         for a in s.get("actions", []):
             lines.append(f"  action {a['name']}({json.dumps(a['params'])}) -> {'ok' if a['ok'] else 'FAILED'}: {a['message']}")
     lines.append(f"[final] telemetry={json.dumps(history.get('final_state', {}))}")
+    lines.append(f"  fixed landmarks inside the front camera's field of view at the end (from telemetry): "
+                 f"{_landmarks_in_view(history.get('final_state'))}")
     lines.append(f"[agent's final report, NOT evidence] success={history.get('success')} text={history.get('final_text', '')!r}")
     return "\n".join(lines)
 
 
 def _sample_frames(history: dict, max_frames: int) -> list[tuple[str, str]]:
-    frames = [(f"step {s['step']}", s["frame_path"]) for s in history.get("steps", [])
-              if s.get("frame_path") and Path(s["frame_path"]).exists()]
-    if len(frames) > max_frames - 1:  # 平均取樣，頭尾一定保留
-        idx = sorted({round(i * (len(frames) - 1) / (max_frames - 2)) for i in range(max_frames - 1)})
-        frames = [frames[i] for i in idx]
+    steps = [s for s in history.get("steps", []) if s.get("frame_path") and Path(s["frame_path"]).exists()]
+    if max_frames > 0 and len(steps) > max_frames - 1:  # 平均取樣，頭尾一定保留；max_frames<=0 代表全部都給
+        idx = sorted({round(i * (len(steps) - 1) / (max_frames - 2)) for i in range(max_frames - 1)})
+        steps = [steps[i] for i in idx]
+    frames = []
+    # 俯視相機的畫面也給 judge（低解析度、每隔一步一張）：agent 用 locate_overhead 找到的東西只出現在這張圖，
+    # 只給前鏡頭會把「從天上看到球、正確回報距離」判成「球從來沒出現在畫面裡」（實測 e06）。
+    # 每張都給、高解析度的話一次請求會超過 gpt-4o 的 TPM 上限（實測 429）。
+    for i, s in enumerate(steps):
+        frames.append((f"step {s['step']} (front camera)", s["frame_path"], "auto"))
+        ov = s.get("overhead_frame_path")
+        if ov and Path(ov).exists() and (i % 2 == 0 or i == len(steps) - 1):
+            frames.append((f"step {s['step']} (overhead camera, fixed top-down view of the whole room)", ov, "low"))
+    # pick/place 之後手臂放低拍的證據影格：夾爪裡的物件 / 放下的物件，每張都給（數量很少）
+    for s in history.get("steps", []):
+        for a in s.get("actions", []):
+            ev = a.get("evidence_frame_path")
+            if ev and Path(ev).exists():
+                frames.append((f"step {s['step']} right after {a.get('name')} (front camera, arm lowered to look at the gripper/floor)", ev, "auto"))
     final = history.get("final_frame_path")
     if final and Path(final).exists():
-        frames.append(("FINAL", final))
+        frames.append(("FINAL (front camera)", final, "auto"))
     return frames
 
 
-async def judge_run(task: dict, history: dict, judge_llm, max_frames: int = 8) -> tuple[list[MilestoneResult], dict]:
+async def judge_run(task: dict, history: dict, judge_llm, max_frames: int = 12) -> tuple[list[MilestoneResult], dict]:
     """回傳 (每個 milestone 的結果, {"verdict", "reasoning", "failure_reason"})。"""
     milestones = task.get("milestones", [])
     results: dict[str, MilestoneResult] = {}
     for m in milestones:
-        r = check_telemetry(m, history)
+        r = check_telemetry(m, history) or check_report(m, history)
         if r is not None:
             results[m["id"]] = r
     pending = [m for m in milestones if m["id"] not in results]
@@ -186,16 +282,36 @@ async def judge_run(task: dict, history: dict, judge_llm, max_frames: int = 8) -
         f"<run_log>\n{_step_log(history)}\n</run_log>\n\n"
         "Camera images follow, each preceded by its label."
     )
-    parts: list = [ContentPartTextParam(text=text)]
-    for label, path in _sample_frames(history, max_frames):
-        b64 = base64.b64encode(Path(path).read_bytes()).decode("ascii")
-        parts.append(ContentPartTextParam(text=f"Image at {label}:"))
-        parts.append(ContentPartImageParam(image_url=ImageURL(url=f"data:image/jpeg;base64,{b64}", media_type="image/jpeg")))
+    def build_parts(frames):
+        parts: list = [ContentPartTextParam(text=text)]
+        for label, path, detail in frames:
+            b64 = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+            parts.append(ContentPartTextParam(text=f"Image at {label}:"))
+            parts.append(ContentPartImageParam(image_url=ImageURL(url=f"data:image/jpeg;base64,{b64}",
+                                                                  media_type="image/jpeg", detail=detail)))
+        return parts
 
     judgement = {"verdict": None, "reasoning": None, "failure_reason": None}
+    frames = _sample_frames(history, max_frames)
     try:
-        resp = await judge_llm.ainvoke([SystemMessage(content=JUDGE_SYSTEM), UserMessage(content=parts)],
-                                       output_format=_JudgeOutput)
+        resp = None
+        last_err = None
+        # 429（TPM 超限）就退避重試；還是不行就把圖減半再試一次，不要讓整題的 LLM milestone 全部變成「judge failed」
+        for attempt, wait_s in enumerate((0, 20, 45, 70)):
+            if wait_s:
+                await asyncio.sleep(wait_s)
+            try:
+                resp = await judge_llm.ainvoke([SystemMessage(content=JUDGE_SYSTEM), UserMessage(content=build_parts(frames))],
+                                               output_format=_JudgeOutput)
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if "429" not in str(e) and "RateLimit" not in type(e).__name__:
+                    raise
+                if attempt == 1 and len(frames) > 4:
+                    frames = frames[::2]  # 請求本身太大時，抽樣減半
+        if resp is None:
+            raise last_err
         out: _JudgeOutput = resp.completion
         by_id = {v.id: v for v in out.milestones}
         for m in pending:

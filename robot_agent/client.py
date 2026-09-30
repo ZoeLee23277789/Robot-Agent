@@ -1,7 +1,7 @@
 """
 Robot server 的 HTTP client。
 只用標準函式庫，所有阻塞呼叫都丟到 thread 裡，這樣 agent loop 可以維持 async，
-跟原本 browser_use 的寫法一致。
+跟 LLM 層的呼叫寫法一致。
 """
 
 import asyncio
@@ -87,10 +87,10 @@ class RobotClient:
             return None
         return raw if status == 200 and ctype.startswith("image/") else None
 
-    async def act(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def act(self, name: str, params: dict[str, Any], timeout: Optional[float] = None) -> dict[str, Any]:
         try:
             return await asyncio.to_thread(
-                self._json, "POST", "/action", {"name": name, "params": params}, self.action_timeout
+                self._json, "POST", "/action", {"name": name, "params": params}, timeout or self.action_timeout
             )
         except Exception as e:
             # 連線層出錯時不知道機器人停了沒，保險起見補送一次 stop

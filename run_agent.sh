@@ -1,6 +1,5 @@
 #!/bin/bash
-# Agent 端：固定使用 .venv，預設用 Gemini Robotics ER。
-# 已切換成真的 browser_use.Agent (RobotAgentBU.py)；舊的自己重寫版本 (RobotAgent.py) 還在，
-# 想跑舊版對照就直接 .venv/bin/python RobotAgent.py ...。
+# 啟動 LLM agent（robot_agent/service.py 的迴圈）。用法跟 RobotAgent.py 一樣：
+#   ./run_agent.sh --task "..."     或    ./run_agent.sh --loop
 cd "$(dirname "$0")"
-exec .venv/bin/python RobotAgentBU.py --provider robotics-er "$@"
+exec .venv/bin/python RobotAgent.py --provider "${ROBOT_LLM_PROVIDER:-robotics-er}" "$@"

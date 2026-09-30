@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-RoboMaster LLM Agent 的進入點 (對應原本的 Agent.py)。
+RoboMaster LLM Agent 的進入點。
 
 先在機器人那一端啟動 robot_server.py，然後在這個 repo 的環境 (Python 3.11+) 執行：
 
@@ -32,6 +32,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--robot-url", default=os.getenv("ROBOT_SERVER_URL", "http://127.0.0.1:8765"))
     ap.add_argument("--robot-token", default=os.getenv("ROBOT_SERVER_TOKEN", ""))
     ap.add_argument("--max-steps", type=int, default=30)
+    ap.add_argument("--planner-interval", type=int, default=5, help="每幾步用完整歷史檢查一次有沒有在原地打轉")
+    ap.add_argument("--history-items", type=int, default=12, help="長期摘要每累積這麼多步觸發一次")
     ap.add_argument("--run-dir", default=None, help="這次執行的紀錄資料夾，預設 runs/<timestamp>")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--confirm", dest="confirm", action="store_true", default=None,
@@ -43,7 +45,8 @@ def parse_args() -> argparse.Namespace:
 
 async def run_task(task: str, args, llm, robot: RobotClient, confirm: bool):
     agent = RobotAgent(task=task, llm=llm, robot=robot, max_steps=args.max_steps,
-                       run_dir=args.run_dir, confirm_each_step=confirm)
+                       run_dir=args.run_dir, confirm_each_step=confirm,
+                       planner_interval=args.planner_interval, history_items=args.history_items)
     return await agent.run()
 
 

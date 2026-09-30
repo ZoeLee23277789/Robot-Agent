@@ -1,5 +1,5 @@
 """
-動作註冊表：對應 browser_use 的 Tools()。
+動作註冊表：對應 通用 agent 框架的 Tools()。
 
 以前新增一個動作要同時改三個地方才會保持一致：views.py 的 RobotAction union 手動加一個
 Optional 欄位、service.py 的 ACTION_HANDLERS 手動加一筆對應、system_prompt.md 手動補文件。
@@ -9,7 +9,7 @@ Optional 欄位、service.py 的 ACTION_HANDLERS 手動加一筆對應、system_
 ACTION_SPECS，give LLM 看的 schema (RobotAction) 是從這份登記表動態長出來的 pydantic
 model，service.py 的 dispatch 表也直接從這裡衍生，兩邊永遠對得上、不會漏改。
 
-跟 browser_use 的 Tools() 不同的一點：這裡不是把處理邏輯本身放進登記表 (browser_use
+跟 通用 agent 框架的 Tools() 不同的一點：這裡不是把處理邏輯本身放進登記表 (agent 框架
 用的是不綁狀態的 free function，把 browser_session 當參數注入)，而是仍然放在
 RobotAgent 的方法裡，因為每個 handler 都要用到 self.robot/self.llm/self.world_state
 這些執行期才有的東西——用方法名稱字串對應，執行時用 getattr(self, handler_name) 取出來，
@@ -27,6 +27,8 @@ class MoveChassisParams(BaseModel):
     forward_m: float = Field(0.0, description="meters; positive = forward, negative = backward. Max 1.0 per action")
     right_m: float = Field(0.0, description="meters; positive = strafe right, negative = strafe left. Max 1.0")
     turn_left_deg: float = Field(0.0, description="degrees; positive = turn left (CCW), negative = turn right. Max 180")
+    push: bool = Field(False, description="true ONLY when you intend to push the object in front; otherwise a forward move "
+                                          "stops 0.15 m short of anything the front distance sensor sees")
 
 
 class MoveArmParams(BaseModel):
@@ -61,6 +63,30 @@ class LocateParams(BaseModel):
 
 class AskHumanParams(BaseModel):
     question: str
+
+
+class GoToParams(BaseModel):
+    target: str = Field(description="a fixed landmark name (tunnel, ball_pit, bench, bin_balls, bin_blocks, platform, "
+                                    "stairs, slide, pillar_red/blue/yellow/green), an object description seen from "
+                                    "above ('purple ball'), or world coordinates 'x, y'")
+
+
+class ApproachParams(BaseModel):
+    object: str = Field(description="the task target to reach, e.g. 'red box', 'small green block'")
+    stop_m: float = Field(0.4, description="how far in front of the object to stop, metres (0.15 to 1.0)")
+
+
+class PickParams(BaseModel):
+    object: str = Field(description="the object to grasp, e.g. 'purple ball', 'small green block' (or 'x, y')")
+
+
+class PlaceParams(BaseModel):
+    target: str = Field(description="where to put the held object: a landmark (bin_blocks, bin_balls, mat_red, mat_green, "
+                                    "mat_blue, ...), an object description, or world coordinates 'x, y'")
+
+
+class DriveThroughParams(BaseModel):
+    structure: str = Field(description="'tunnel' or 'platform' (drive underneath), or another pass-through structure")
 
 
 class DoneParams(BaseModel):
@@ -117,6 +143,34 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         "or drive through something, since facing an elongated object's centre from an angle is not the same "
         "as being aligned with it. Ends the step.",
         "_h_align_to_tunnel"),
+    "go_to": ActionSpec(
+        GoToParams,
+        "Autonomous navigation: plans a collision-free path on the room map and drives there in ONE call "
+        "(landmark name, object description, or 'x, y'). Stops ~0.45 m in front of landmarks/objects, facing them. "
+        "Ends the step.",
+        "_h_go_to"),
+    "approach": ActionSpec(
+        ApproachParams,
+        "Reach a task target and face it at close range: finds it from above, drives there on a planned path, "
+        "stops stop_m in front, fine-aligns with the front camera and reports bearing + tof_front_mm. Use for every "
+        "'go to / find and stop near X' task. Ends the step.",
+        "_h_approach"),
+    "pick": ActionSpec(
+        PickParams,
+        "Grasp an object in ONE call: drives to it, opens the gripper, lowers the arm, feeds the object between the "
+        "fingers using the front distance sensor, closes, lifts, and VERIFIES the object came along. Reports GRASPED "
+        "or exactly why not. Ends the step.",
+        "_h_pick"),
+    "place": ActionSpec(
+        PlaceParams,
+        "Put down the held object at a target in ONE call: drives there, raises the arm over a bin's rim or lowers it "
+        "onto a mat/floor, opens the gripper, backs up and recentres the arm. Ends the step.",
+        "_h_place"),
+    "drive_through": ActionSpec(
+        DriveThroughParams,
+        "Drive through the tunnel or underneath the platform along its long axis, entrance to exit, and report "
+        "whether the robot really came out the other side. Ends the step.",
+        "_h_drive_through"),
     "remember": ActionSpec(RememberParams, "Store one short general fact for FUTURE tasks.", "_h_remember"),
     "ask_human": ActionSpec(AskHumanParams, "Ask the human operator a question.", "_h_ask_human"),
     "done": ActionSpec(DoneParams, "Finish the task. Must be the only action in its step.", "_h_done"),
@@ -124,7 +178,7 @@ ACTION_SPECS: dict[str, ActionSpec] = {
 
 
 def _build_action_union() -> type:
-    """對應 browser_use 的 Tools() 自動產生 schema：從 ACTION_SPECS 動態長出一個
+    """對應 通用 agent 框架的 Tools() 自動產生 schema：從 ACTION_SPECS 動態長出一個
     pydantic model，每個註冊過的動作各一個 Optional 欄位，不用手寫逐欄位的 union。"""
     fields = {name: (Optional[spec.param_model], None) for name, spec in ACTION_SPECS.items()}
     model = create_model("RobotAction", **fields)

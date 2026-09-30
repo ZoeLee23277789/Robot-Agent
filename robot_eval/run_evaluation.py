@@ -31,8 +31,8 @@ async def _auto_answer(question: str) -> str:
     return "No human is available during evaluation. Decide by yourself and continue."
 
 
-async def evaluate_history(task: dict, history: dict, judge_llm, out_dir: Path):
-    milestones, judgement = await judge_run(task, history, judge_llm)
+async def evaluate_history(task: dict, history: dict, judge_llm, out_dir: Path, judge_frames: int = 12):
+    milestones, judgement = await judge_run(task, history, judge_llm, max_frames=judge_frames)
     metrics = create_task_metrics(task, history, milestones, judgement)
     for m in milestones:
         print(f"    {'✓' if m.passed else '✗'} {m.milestone_id} [{m.method}] {m.reasoning}")
@@ -53,6 +53,7 @@ async def amain() -> None:
     ap.add_argument("--model", default=None)
     ap.add_argument("--judge-provider", default=os.getenv("JUDGE_PROVIDER", "openai"))
     ap.add_argument("--judge-model", default=os.getenv("JUDGE_MODEL", "gpt-4o"))
+    ap.add_argument("--judge-frames", type=int, default=12, help="給 judge 看的相機畫面張數（平均抽樣，0 = 全部）")
     ap.add_argument("--robot-url", default=os.getenv("ROBOT_SERVER_URL", "http://127.0.0.1:8765"))
     ap.add_argument("--robot-token", default=os.getenv("ROBOT_SERVER_TOKEN", ""))
     ap.add_argument("--max-steps", type=int, default=30)
@@ -74,7 +75,7 @@ async def amain() -> None:
             raise SystemExit("--rejudge 需要剛好一個 --task")
         run_dir = Path(args.rejudge)
         history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
-        await evaluate_history(tasks[0], history, judge_llm, run_dir)
+        await evaluate_history(tasks[0], history, judge_llm, run_dir, args.judge_frames)
         return
 
     llm = build_llm(args.provider, args.model)
@@ -105,7 +106,7 @@ async def amain() -> None:
                 print(f"   ✗ 執行失敗：{e}")
                 await robot.stop()
                 history = {"steps": [], "run_dir": str(run_dir), "final_text": f"execution failed: {e}"}
-            all_metrics.append(await evaluate_history(task, history, judge_llm, run_dir))
+            all_metrics.append(await evaluate_history(task, history, judge_llm, run_dir, args.judge_frames))
 
     report = build_report(all_metrics)
     report["config"] = {"agent": f"{args.provider}/{llm.model}", "judge": f"{args.judge_provider}/{judge_llm.model}",
