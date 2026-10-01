@@ -26,10 +26,8 @@ def _quiet_logs() -> None:
 
 DEFAULT_MODELS = {
     "openai": "gpt-4o",
-    "anthropic": "claude-sonnet-4-5",
     "google": "gemini-2.5-flash",
     "robotics-er": "gemini-robotics-er-2-preview",
-    "ollama": "qwen2.5vl:7b",
     "mlx": "default",
 }
 
@@ -50,9 +48,6 @@ def build_llm(provider: str, model: Optional[str] = None):
     if provider == "openai":
         from robot_agent.llm.openai.chat import ChatOpenAI
         return ChatOpenAI(model=model, api_key=_need("OPENAI_API_KEY"))
-    if provider == "anthropic":
-        from robot_agent.llm.anthropic.chat import ChatAnthropic
-        return ChatAnthropic(model=model, api_key=_need("ANTHROPIC_API_KEY"))
     if provider in ("google", "gemini"):
         from robot_agent.llm.google.chat import ChatGoogle
         return ChatGoogle(model=model, api_key=_need("GOOGLE_API_KEY"))
@@ -71,9 +66,6 @@ def build_llm(provider: str, model: Optional[str] = None):
             max_output_tokens=int(os.getenv("ROBOT_MAX_OUTPUT_TOKENS", "7000")),
             config={"thinking_config": {"thinking_level": level}},
         )
-    if provider == "ollama":
-        from robot_agent.llm.ollama.chat import ChatOllama
-        return ChatOllama(model=model)
     if provider == "mlx":
         # 跟 Agent.py 相同：MLX 走 OpenAI 相容伺服器
         from robot_agent.llm.openai.chat import ChatOpenAI

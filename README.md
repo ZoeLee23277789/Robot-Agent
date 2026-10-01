@@ -1,11 +1,10 @@
 # RoboMaster LLM Agent
 
-用 LLM 當 DJI RoboMaster EP 的高階控制器。觀察來源是前方相機 + 固定俯視相機 + 遙測，動作空間是底盤、手臂、夾爪，加上導航／抓取這些一次到位的技能。Agent 端有兩條可互換的「觀察、思考、行動」迴圈，共用同一套技能、感知、動作定義與 system prompt：
-
-- `RobotAgent.py` → `robot_agent/service.py`：自己寫的迴圈，跑分（`robot_eval/`）用的是這條。
-- `RobotAgentCore.py` → `robot_agent/core/`：通用 agent 框架的迴圈（改寫自 browser-use，MIT），透過 `core_session.py`／`core_tools.py`／`core_common.py` 接到機器人上。
+用 LLM 當 DJI RoboMaster EP 的高階控制器。觀察來源是前方相機 + 固定俯視相機 + 遙測，動作空間是底盤、手臂、夾爪，加上導航／抓取這些一次到位的技能。`RobotAgent.py` → `robot_agent/service.py` 是整個 Agent 端唯一的「觀察、思考、行動」迴圈，自己寫的，不依賴外部 agent 框架；跑分（`robot_eval/`）用的也是這條。
 
 `robot_eval/` 是 milestone 式的評估框架，加上遙測條件判定與 LLM judge。
+
+曾經有第二條改寫自 browser-use 框架的迴圈（`RobotAgentCore.py`），功能跟自己的迴圈重疊（兩邊都有 planner、長期摘要），卻多背了一萬多行第三方程式碼和 7 個額外套件、也從沒進過 `robot_eval` 的跑分驗證，已經拿掉；裡面兩個真的有價值的東西——真實 token/花費統計、完成後用取樣截圖自我查核——已經搬進自己的迴圈，見下面「自我查核與用量統計」。
 
 ## 為什麼拆成兩個程序
 
@@ -13,18 +12,16 @@ RoboMaster SDK 只支援 Python 3.6 到 3.8，這個 repo 的 LLM 層需要 3.11
 
 ```
 [ Agent 端  .venv, Python 3.11+ ]                      [ 機器人端  rmenv, Python 3.6-3.8, 檔案在 Test_Robot/ ]
-RobotAgent.py      進入點：自己的迴圈 (--task / --loop)   robot_server.py
-RobotAgentCore.py  進入點：框架迴圈 (同樣的參數)            安全限幅、動作鎖、緊急停止、ToF 防撞
-  robot_agent/service.py     自己的迴圈：觀察→思考→行動、planner、長期摘要
-  robot_agent/core/          框架迴圈 (改寫自 browser-use)；core_session/core_tools/core_common 是接合層
-  robot_agent/actions.py     動作註冊表 (參數 schema + handler，兩條迴圈共用)   距離感測器 / 俯視攝影機 / 靜態地標
+RobotAgent.py      進入點 (--task / --loop)              robot_server.py
+  robot_agent/service.py     觀察→思考→行動、planner、長期摘要、自我查核、token 統計   安全限幅、動作鎖、緊急停止、ToF 防撞
+  robot_agent/actions.py     動作註冊表 (參數 schema + handler)                     距離感測器 / 俯視攝影機 / 靜態地標
   robot_agent/skills.py      go_to/approach/drive_through/pick/place  nav_map.py   占據格地圖 + A*（navigate_to）
   robot_agent/perception.py  locate/face/locate_overhead/align_to_tunnel  rm_connection.py / patch_ftp.py
-  robot_agent/llm/           各家 LLM 的呼叫包裝（openai/anthropic/google/ollama）
+  robot_agent/llm/           LLM 的呼叫包裝（openai/google；其他供應商已拿掉，見 llm/__init__.py 的註解）
   robot_agent/client.py  ── HTTP (JSON + JPEG) ──▶            └─ RoboMaster SDK ─▶ CoppeliaSim 或實體 EP
 ```
 
-`robot_agent/core/`（框架迴圈）與 `robot_agent/llm/`（LLM 呼叫層）改寫自 browser-use 專案（MIT，見 `THIRD_PARTY_NOTICES.md`），用不到的 CLI、雲端同步、沙盒、遙測、瀏覽器整合、瀏覽器 session 與 DOM 處理都已移除或換成空殼；其他都是本專案自己的程式碼。除了你設定的 LLM API 之外不會連任何外部服務。
+`robot_agent/llm/`（LLM 呼叫包裝與訊息型別）改寫自 browser-use 專案（MIT，見 `THIRD_PARTY_NOTICES.md`）；其他都是本專案自己的程式碼。除了你設定的 LLM API 之外不會連任何外部服務。
 
 ## 執行步驟
 
@@ -38,9 +35,9 @@ RobotAgentCore.py  進入點：框架迴圈 (同樣的參數)            安全�
 3. 跑任務：
    ```bash
    ./run_task.sh "Rotate to find the red box, then drive up to it and stop about 30 cm away"   # 準備+執行一次到底
-   ./run_agent.sh --task "..."      # 自己的迴圈；前提是 start_all.sh 已經跑過
+   ./run_agent.sh --task "..."      # 前提是 start_all.sh 已經跑過
    ./run_agent.sh --loop            # 互動模式，一直問你下一個任務是什麼
-   ./run_agent_core.sh --task "..." # 同樣的任務改用框架迴圈跑
+   ./run_agent.sh --task "..." --no-judge   # 關掉完成後的自我查核（見下）
    ```
 
 沒有模擬器也想先測 Agent 迴圈的話，用 `./start_server.sh mock`（等同 `python Test_Robot/robot_server.py --mode mock`），它會模擬一台 2D 機器人和一個紅色目標，不需要安裝 SDK。
@@ -101,7 +98,7 @@ Agent 端的 `robot_agent/skills.py` 把這些包成 `go_to`／`approach`／`dri
 | `move_chassis(forward_m, right_m, turn_left_deg, push)` | 相對移動，`+turn_left_deg` = 逆時針/左轉。平移先做、旋轉後做，單次上限 1m/180 度。往前走會自動在前方感測器看到的東西前 0.15 m 停下（回報會說明），要推東西得傳 `push=true`。 |
 | `move_arm` / `arm_to` / `recenter_arm` | 手臂相對移動 / 絕對姿態 / 回預設姿態 (89,117)。`arm_to` 與 `recenter_arm` 都會用 `arm_mm` 核對有沒有真的到位。相機掛在手臂上，動手臂也會改變視角。 |
 | `gripper(state, power)` | 開或關夾爪（預設 power 50）。 |
-| `pick(object)` | 一次完成抓取：導航到物件前 0.3 m → 張開、手臂放到 (180,30) → 用前方距離感測器一步步把物件送進指間（先到 120 mm，沒夾到再深到 85 mm）→ 關夾爪、抬起 → 倒退 0.25 m 驗證（在手上的話感測器讀值不變）→ 回報 GRASPED 或失敗原因。成功後手臂進搬運姿態，伺服器記住手上物件的感測器讀值（導航忽略它）。 |
+| `pick(object)` | 一次完成抓取：導航到物件前 0.3 m → 張開、手臂放到 (180,30) → 用前方距離感測器一步步把物件送進指間（先到 95 mm，沒夾到再深到 80 mm）→ 關夾爪、抬起 → 倒退 0.25 m 驗證（在手上的話感測器讀值不變）→ 回報 GRASPED 或失敗原因。成功後手臂進搬運姿態，伺服器記住手上物件的感測器讀值（導航忽略它）。 |
 | `place(target)` | 一次完成放置：導航到目標 → 收納箱用高位釋放（手臂 (160,170)，夾爪離地 0.25 m 高過桶壁，依距離前進到車頭離桶壁 3 cm）；地墊／地面／其他用低位釋放 → 張開 → 倒退、手臂歸位。 |
 | `locate(object)` | 只看前鏡頭，回報物體在畫面上的方位角跟該轉幾度置中，不移動機器人。 |
 | `face(object)` | 找到物體並自動轉向對準它（最多修正兩次）。 |
@@ -113,6 +110,13 @@ Agent 端的 `robot_agent/skills.py` 把這些包成 `go_to`／`approach`／`dri
 | `remember(fact)` | 把關於機器人本體/感測器的一般性事實存起來，之後每次任務的 system prompt 都會帶上（`<learned_notes>`）。 |
 | `ask_human(question)` | 任務不明確、卡住、或動作有風險時詢問人類，逾時 180 秒沒回應會被中斷該步驟。 |
 | `stop()` | 立刻停止底盤，不受動作鎖限制。 |
+
+## 自我查核與 token 統計
+
+`RobotAgent.py` 預設在任務結束時做兩件事，不用額外設定：
+
+- **自我查核**（`use_judge`，預設開，`--no-judge` 關掉）：只在 agent 自己回報 `success=true` 時才跑，拿整段過程平均取樣的截圖（最多 6 張）加任務描述，另外問一次 LLM「畫面證據真的支持這個結論嗎」，不是看動作回傳的 `ok` 旗標。跟自評不同意時會印出警告並把判定與理由存進 `history.json` 的 `judge_verdict`/`judge_reasoning`。這跟 `robot_eval/` 事後用完整 state_trace、里程碑遙測做的批次判定是兩回事——那邊更完整，這裡是給沒有經過 `robot_eval`、直接互動跑任務時，也有一道「別只信自評」的檢查。`robot_eval` 呼叫 `RobotAgent` 時沒有打開這個選項，不影響跑分批次的行為或數字。
+- **token/花費統計**：每次真的呼叫 LLM（主迴圈、planner、長期摘要、自我查核都算），從回應本身的 `usage` 欄位累加 prompt/completion/total token 數，不是用字元數估計。跑完印一行 `📊 N 次 LLM 呼叫｜... tokens`，同時存進 `history.json` 的 `llm_calls`/`total_tokens` 等欄位。
 
 ## 遠端機器人
 
@@ -202,19 +206,14 @@ Dataset 格式：`id, difficulty, category, description, milestones`。milestone
 
 ## 新增動作
 
-在 `robot_agent/actions.py` 的 `ACTION_SPECS` 加一個項目（Pydantic 參數模型 + 一句給 LLM 看的說明 + handler 名稱），在 `robot_agent/service.py` 實作對應的 `_h_<name>` handler；需要移動或查詢機器人就透過 `self.robot.act(...)`／`self.robot.state()`。需要多步閉迴路的動作（導航、抓取）寫在 `robot_agent/skills.py`，handler 只包裝結果。框架迴圈那邊在 `robot_agent/core_tools.py` 用 `@tools.action(...)` 再登記一次（同一個參數模型、同一份 skills 實作）。`system_prompt.md` 的動作說明也要同步補一行。
+在 `robot_agent/actions.py` 的 `ACTION_SPECS` 加一個項目（Pydantic 參數模型 + 一句給 LLM 看的說明 + handler 名稱），在 `robot_agent/service.py` 實作對應的 `_h_<name>` handler；需要移動或查詢機器人就透過 `self.robot.act(...)`／`self.robot.state()`。需要多步閉迴路的動作（導航、抓取）寫在 `robot_agent/skills.py`，handler 只包裝結果。`system_prompt.md` 的動作說明也要同步補一行。
 
 ## 目錄
 
 ```
-RobotAgent.py             進入點（自己的迴圈）(.venv, Python 3.11+)：--task 單次任務、--loop 互動模式
-RobotAgentCore.py         進入點（框架迴圈），參數相同
+RobotAgent.py             進入點 (.venv, Python 3.11+)：--task 單次任務、--loop 互動模式
 robot_agent/
-  service.py                自己的迴圈：觀察→思考→行動、planner、長期摘要、動作 handler
-  core/                     框架迴圈（改寫自 browser-use，MIT）：agent/ 迴圈與訊息管理、tools/ 動作註冊表（只剩 done/wait）、browser/ dom/ 只留狀態資料結構（瀏覽器 session、事件、watchdog、DOM 序列化器都已移除）
-  core_session.py           把機器人的雙攝影機畫面與遙測包成框架看得懂的「瀏覽器狀態」
-  core_tools.py             框架迴圈的動作定義（同一份 actions.py 參數模型，同一份 skills.py 實作）
-  core_common.py            框架迴圈的 world_state / plan hook / 長期摘要 hook
+  service.py                主迴圈：觀察→思考→行動、planner、長期摘要、自我查核、token 統計、動作 handler
   actions.py                動作註冊表（參數 schema + 說明 + handler 名稱）
   skills.py                 go_to/approach/drive_through/pick/place（伺服器閉迴路 + 感測器驗證）
   llm/                      各家 LLM 的呼叫包裝與訊息型別（改寫自 browser-use 的 llm 子套件，MIT）
@@ -235,3 +234,7 @@ Env/                       CoppeliaSim 場景與感測器建置腳本 (.venv 執
   add_proximity_sensors.py   獨立的距離感測器建立腳本 (robot_server.py 開機會自動做，通常不用手動跑)
 start_all.sh / run_task.sh / run_agent.sh / start_server.sh   啟動腳本（都從 repo 根目錄執行）
 ```
+
+## 動作空間之外：讓 LLM 自己推理
+
+`system_prompt.md` 的 `<task_interpretation>` 區塊明講使用者的任務可能是目標或需求（「我好口渴」），不只是逐步指令——LLM 要先想清楚物理上要做什麼，再決定用現成技能還是自己組合原語。`go_to`/`approach`/`pick`/`place`/`drive_through` 仍然是建議的預設選項（已經把導航、抓取踩過的坑都處理好了），但不再是唯一合法選項：任務吻合不到任何一個技能時，LLM 被要求自己用 `move_chassis`/`arm_to`/`move_arm`/`gripper` 推理出一條路，而不是卡住或硬套錯的技能。

@@ -24,22 +24,23 @@ from robot_agent.llm.messages import (
 	ContentPartTextParam as ContentText,
 )
 
-# 這份 vendor 進 RoboMaster agent 的版本只保留 robot_agent/llm_factory.py 會用到的四個 provider
-# (openai / anthropic / google / ollama)。其他 provider (aws、azure、cerebras、deepseek、groq、
-# openrouter、oci_raw、robot_agent cloud) 跟 models.py 的預設模型清單都已移除。
+# 這份 vendor 進 RoboMaster agent 的版本只保留 robot_agent/llm_factory.py 會用到的 provider：
+# openai（行動模型的選項之一，也是 robot_eval 的 judge）、google（Gemini / Gemini Robotics-ER，
+# 實際在用的行動模型）。2026-09-30 拿掉 anthropic/ollama：沒有 Anthropic API key、也從沒跑過
+# Ollama，llm_factory.py 裡本來就是各自獨立 import，刪掉不影響還在用的這兩家。其他 provider
+# (aws、azure、cerebras、deepseek、groq、openrouter、oci_raw、robot_agent cloud) 跟 models.py
+# 的預設模型清單更早之前就已經移除。要再加回某家供應商，從 git 歷史或
+# robomaster_removed_core/_unused_llm_providers_2026-09-30/ 拿對應資料夾回來，照同樣的
+# lazy-import 寫法接回 llm_factory.py 即可。
 
 # Type stubs for lazy imports
 if TYPE_CHECKING:
-	from robot_agent.llm.anthropic.chat import ChatAnthropic
 	from robot_agent.llm.google.chat import ChatGoogle
-	from robot_agent.llm.ollama.chat import ChatOllama
 	from robot_agent.llm.openai.chat import ChatOpenAI
 
 # Lazy imports mapping for heavy chat models
 _LAZY_IMPORTS = {
-	'ChatAnthropic': ('robot_agent.llm.anthropic.chat', 'ChatAnthropic'),
 	'ChatGoogle': ('robot_agent.llm.google.chat', 'ChatGoogle'),
-	'ChatOllama': ('robot_agent.llm.ollama.chat', 'ChatOllama'),
 	'ChatOpenAI': ('robot_agent.llm.openai.chat', 'ChatOpenAI'),
 }
 
@@ -73,6 +74,4 @@ __all__ = [
 	'BaseChatModel',
 	'ChatOpenAI',
 	'ChatGoogle',
-	'ChatAnthropic',
-	'ChatOllama',
 ]

@@ -13,12 +13,3 @@ google-genai>=1.0.0
 ollama>=0.4.0
 
 # 這些是它 import 時真正會用到、缺了就會直接 ImportError 的第三方套件。
-
-# 框架迴圈（robot_agent/core，RobotAgentCore.py）在 import 時就需要的套件；只跑自己的迴圈（RobotAgent.py）可以不裝
-bubus>=1.5.0
-cdp-use>=1.4.0
-uuid7>=0.1.0
-pydantic-settings>=2.2
-psutil>=5.9
-pyotp>=2.9.0
-reportlab>=4.0.0

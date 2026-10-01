@@ -17,8 +17,17 @@ from robot_agent.actions import RobotAction
 
 __all__ = [
     "RobotAction", "RobotAgentOutput", "ActionResult", "ActionRecord", "StepRecord",
-    "RunResult", "KnownObject", "WorldState",
+    "RunResult", "KnownObject", "WorldState", "JudgeVerdict",
 ]
+
+
+class JudgeVerdict(BaseModel):
+    """對應框架迴圈 agent/judge.py 的 JudgementResult：拿證據（取樣截圖 + 任務文字）去問 LLM
+    「自評成功是不是真的成立」，不是看動作回傳的 ok 旗標，是看影像證據——跟 robot_eval/judge.py
+    同一個精神，差別是這個在互動模式下（RobotAgent.py --task/--loop，不經過 robot_eval）也能跑，
+    不用等事後批次評估。"""
+    verdict: bool = Field(description="true if the evidence actually supports the agent's claimed outcome")
+    reasoning: str = Field(description="1-2 sentences citing what the images/history actually show")
 
 
 class RobotAgentOutput(BaseModel):
@@ -97,6 +106,14 @@ class RunResult(BaseModel):
     duration_s: float = 0.0
     latest_plan: str = ""
     long_term_summary: str = ""
+    # 對應框架迴圈 tokens/service.py：真的從每次 LLM 回應的 usage 欄位累加，不是用字元數/4 的
+    # _estimate_tokens 粗估（那個只拿來決定歷史該截到哪，從來不是真的用量）。
+    llm_calls: int = 0
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_tokens: int = 0
+    judge_verdict: Optional[bool] = None
+    judge_reasoning: str = ""
 
     # ---- 對應 通用 agent 框架的 AgentHistoryList 便利方法 ----
     def is_successful(self) -> Optional[bool]:

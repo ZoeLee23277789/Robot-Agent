@@ -7,7 +7,7 @@ RoboMaster LLM Agent 的進入點。
 
     python RobotAgent.py --task "Find the red box and stop 30 cm in front of it"
     python RobotAgent.py --loop                          # 互動模式，連續下任務
-    python RobotAgent.py --provider anthropic --task "..."
+    python RobotAgent.py --provider openai --task "..."
     python RobotAgent.py --robot-url http://100.x.y.z:8765 --task "..."   # 遠端機器人
 """
 
@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--task", help="自然語言任務；不給就進入互動模式")
     ap.add_argument("--loop", action="store_true", help="互動模式：同一個連線連續下多個任務")
     ap.add_argument("--provider", default=os.getenv("ROBOT_LLM_PROVIDER", "openai"),
-                    choices=["openai", "anthropic", "google", "gemini", "robotics-er", "ollama", "mlx"])
+                    choices=["openai", "google", "gemini", "robotics-er", "mlx"])
     ap.add_argument("--model", default=None)
     ap.add_argument("--robot-url", default=os.getenv("ROBOT_SERVER_URL", "http://127.0.0.1:8765"))
     ap.add_argument("--robot-token", default=os.getenv("ROBOT_SERVER_TOKEN", ""))
@@ -35,6 +35,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--planner-interval", type=int, default=5, help="每幾步用完整歷史檢查一次有沒有在原地打轉")
     ap.add_argument("--history-items", type=int, default=12, help="長期摘要每累積這麼多步觸發一次")
     ap.add_argument("--run-dir", default=None, help="這次執行的紀錄資料夾，預設 runs/<timestamp>")
+    ap.add_argument("--no-judge", action="store_true",
+                   help="關掉完成後的自我查核（自評成功時，另外拿取樣截圖問一次「真的成立嗎」）")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--confirm", dest="confirm", action="store_true", default=None,
                    help="每一步實體動作前都先問人")
@@ -46,7 +48,8 @@ def parse_args() -> argparse.Namespace:
 async def run_task(task: str, args, llm, robot: RobotClient, confirm: bool):
     agent = RobotAgent(task=task, llm=llm, robot=robot, max_steps=args.max_steps,
                        run_dir=args.run_dir, confirm_each_step=confirm,
-                       planner_interval=args.planner_interval, history_items=args.history_items)
+                       planner_interval=args.planner_interval, history_items=args.history_items,
+                       use_judge=not args.no_judge)
     return await agent.run()
 
 

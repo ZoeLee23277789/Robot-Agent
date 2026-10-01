@@ -36,6 +36,7 @@ from robot_agent.client import RobotClient
 from robot_agent.views import (
     ActionRecord,
     ActionResult,
+    JudgeVerdict,
     KnownObject,
     RobotAgentOutput,
     RunResult,
@@ -130,10 +131,17 @@ class RobotAgent:
         notes_path: Optional[str] = "memory/body_notes.md",
         planner_llm=None,
         planner_interval: int = 5,
+        use_judge: bool = False,
+        judge_llm=None,
     ):
         self.task = task
         self.llm = llm
         self.robot = robot
+        # 對應框架迴圈的 use_judge：互動模式(RobotAgent.py)預設開，robot_eval 的呼叫沒傳這個參數，
+        # 維持 False，不動原本評測批次的行為——robot_eval 自己的 judge.py 事後看整條軌跡，更完整，
+        # 這裡是給沒有經過 robot_eval、直接互動跑任務時，也能有一道「別只信自評」的檢查。
+        self.use_judge = use_judge
+        self.judge_llm = judge_llm or llm
         self.max_steps = max_steps
         self.max_actions_per_step = max_actions_per_step
         self.max_failures = max_failures
@@ -251,6 +259,7 @@ class RobotAgent:
         )
         try:
             resp = await self.planner_llm.ainvoke([UserMessage(content=prompt)])
+            self._accumulate_usage(resp)
             text = resp.completion if isinstance(resp.completion, str) else str(resp.completion)
             self.latest_plan = " ".join(text.split())[:600]
             print(f"   🗺️  plan: {self.latest_plan}")
@@ -277,6 +286,7 @@ class RobotAgent:
         )
         try:
             resp = await self.llm.ainvoke([UserMessage(content=prompt)])
+            self._accumulate_usage(resp)
             text = resp.completion if isinstance(resp.completion, str) else str(resp.completion)
             self.long_term_summary = " ".join(text.split())[:800]
         except Exception:
@@ -566,6 +576,56 @@ class RobotAgent:
         return ActionResult(ok=ok, message=msg, duration_s=round(time.time() - t0, 2),
                              counts_as_failure=False, resets_streak=True)
 
+    def _accumulate_usage(self, completion) -> None:
+        """真的用量，從每次 LLM 回應的 usage 欄位累加（主呼叫/planner/摘要都算），不是
+        _estimate_tokens 那種字元數/4 的粗估——那個只用來決定歷史該截到哪，從來不是真實用量。"""
+        usage = getattr(completion, "usage", None)
+        if usage is None:
+            return
+        self.result.llm_calls += 1
+        self.result.total_prompt_tokens += usage.prompt_tokens or 0
+        self.result.total_completion_tokens += usage.completion_tokens or 0
+        self.result.total_tokens += usage.total_tokens or 0
+
+    async def _run_judge(self) -> None:
+        """對應框架迴圈 agent/judge.py 的 _judge_trace：自評成功時，另外拿證據（整段過程取樣的
+        截圖 + 任務文字）問一次 LLM「這真的成立嗎」，不是看動作回傳的 ok 旗標。只在互動模式
+        (use_judge=True) 跑；robot_eval 有自己更完整的事後批次判定（state_trace、milestone 遙測、
+        抓取/放置的證據照片），這裡不取代它，預設也不開，呼叫端沒傳這個參數就完全不受影響。
+        判定失敗就安靜略過，不影響任務本身已經確定的結果。"""
+        if not self.use_judge or not self.result.is_done or self.result.success is not True:
+            return
+        paths = [p for p in self.result.screenshot_paths() if p]
+        if self.result.final_frame_path:
+            paths.append(self.result.final_frame_path)
+        if not paths:
+            return
+        if len(paths) > 6:  # 平均取樣最多 6 張，涵蓋整個過程，不是只看最後一張
+            step = len(paths) / 6
+            paths = [paths[int(i * step)] for i in range(6)]
+        parts: list = [ContentPartTextParam(text=(
+            f"Task: {self.task}\n\nAgent's own final report (self-reported success=true): "
+            f"{self.result.final_text}\n\nImages below are sampled across the run, in order. "
+            "Does the evidence actually support that the task was completed? Judge from what the "
+            "images show, not from the agent's own words."))]
+        for p in paths:
+            try:
+                b64 = base64.b64encode(Path(p).read_bytes()).decode("ascii")
+                parts.append(ContentPartImageParam(
+                    image_url=ImageURL(url=f"data:image/jpeg;base64,{b64}", media_type="image/jpeg", detail="auto")))
+            except Exception:
+                continue
+        try:
+            resp = await self.judge_llm.ainvoke([UserMessage(content=parts)], output_format=JudgeVerdict)
+            self._accumulate_usage(resp)
+            verdict: JudgeVerdict = resp.completion
+            self.result.judge_verdict = verdict.verdict
+            self.result.judge_reasoning = verdict.reasoning
+            if not verdict.verdict:
+                print(f"⚠️  judge 不同意自評成功：{verdict.reasoning}")
+        except Exception as e:
+            print(f"   ⚠️ judge 呼叫失敗（{type(e).__name__}），略過")
+
     async def _call_llm(self, messages) -> tuple[RobotAgentOutput, float]:
         """有些 provider（實測見於 Gemini Robotics-ER 的 thinking_config：隱藏推理跟最終 JSON
         共用同一個 token 額度）偶爾會生成途中暴走，額度燒光時 JSON 還沒寫完就被截斷、整步作廢。
@@ -576,6 +636,7 @@ class RobotAgent:
             try:
                 t0 = time.time()
                 completion = await self.llm.ainvoke(messages, output_format=RobotAgentOutput)
+                self._accumulate_usage(completion)
                 return completion.completion, round(time.time() - t0, 2)
             except Exception as e:
                 last_exc = e
@@ -679,10 +740,16 @@ class RobotAgent:
             self.result.duration_s = round(time.time() - t_start, 1)
             self._save()
 
+        await self._run_judge()
+        self._save()
+
         status = "✅ 成功" if self.result.is_successful() else ("❌ 失敗" if self.result.is_done else "⏹ 未完成")
         print(f"\n{status}｜{self.result.number_of_steps()} 步｜{self.result.duration_s}s｜紀錄在 {self.run_dir}")
         if self.result.final_result():
             print(f"📝 {self.result.final_result()}")
+        if self.result.llm_calls:
+            print(f"📊 {self.result.llm_calls} 次 LLM 呼叫｜{self.result.total_prompt_tokens} prompt + "
+                  f"{self.result.total_completion_tokens} completion = {self.result.total_tokens} tokens")
         return self.result
 
     def _save(self) -> None:
