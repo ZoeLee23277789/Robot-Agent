@@ -204,6 +204,18 @@ Dataset 格式：`id, difficulty, category, description, milestones`。milestone
 
 任務之間，mock 模式會自動重置；sim 和 real 模式只會收手臂、開夾爪，然後停下來等你把場景擺回原位再按 Enter。
 
+### 跨任務筆記污染與 `--notes-mode`
+
+`remember(note)` 原本不管互動模式還是評估都寫同一個檔案 `memory/body_notes.md`，而評估時每題依序建立新的 `RobotAgent`，後面的題目會讀到前面題目剛寫的筆記。這會讓題目順序影響分數、讓模型之間的比較不公平（某個模型贏可能只是因為批次前段剛好寫了有用的筆記，不是控制得比較好）、也讓重現性沒了（clone 這個 repo 的人、或你自己重跑同一個批次，起點都不是乾淨的）。
+
+`--notes-mode`（`run_evaluation.py` 和 `run_batch.py` 都有）解決這個問題：
+
+- `fixed`（預設）：固定讀 `robot_eval/fixed_notes.md`（人工審核過，進版控），所有題目、所有被比較的模型拿到完全一樣的先驗；`remember()` 照常回應，但不寫回磁碟。跑分數字應該用這個模式比較。
+- `accumulate`：筆記在這次批次執行內真的跨題累積（整個批次共用一個檔案，存在 `<batch_dir>/accumulated_notes.md`），每次重跑批次都從空白開始。當作「允許跨任務學習」的對照組——report.json 的 `config.notes_mode` 會記下用的是哪一種，兩組數字可以直接對照報告。
+- `off`：完全不給筆記、`remember()` 也不寫入，最乾淨的基準線。
+
+互動模式（`RobotAgent.py`，不經過 `robot_eval`）不受影響，繼續預設寫 `memory/body_notes.md`，讓機器人真的能跨 session 累積對自己身體的認識；這個檔案不進版控（見 `.gitignore`），避免你的本機狀態變成別人 clone 這個 repo 的起點。
+
 ## 新增動作
 
 在 `robot_agent/actions.py` 的 `ACTION_SPECS` 加一個項目（Pydantic 參數模型 + 一句給 LLM 看的說明 + handler 名稱），在 `robot_agent/service.py` 實作對應的 `_h_<name>` handler；需要移動或查詢機器人就透過 `self.robot.act(...)`／`self.robot.state()`。需要多步閉迴路的動作（導航、抓取）寫在 `robot_agent/skills.py`，handler 只包裝結果。`system_prompt.md` 的動作說明也要同步補一行。

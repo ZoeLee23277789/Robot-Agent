@@ -192,7 +192,7 @@ def llm_outage(log_path: Path) -> str:
 def run_task(batch_dir: Path, task: dict, args) -> tuple:
     cmd = [sys.executable, "-m", "robot_eval.run_evaluation", "--task", task["id"], "--no-pause",
            "--output-dir", str(batch_dir), "--max-steps", str(args.max_steps)]
-    for opt in ("provider", "model", "judge_provider", "judge_model", "judge_frames"):
+    for opt in ("provider", "model", "judge_provider", "judge_model", "judge_frames", "notes_mode", "notes_path"):
         if getattr(args, opt) is not None:
             cmd += [f"--{opt.replace('_', '-')}", str(getattr(args, opt))]
     t0 = time.time()
@@ -264,6 +264,11 @@ def main() -> None:
     ap.add_argument("--judge-provider", default=None)
     ap.add_argument("--judge-model", default=None)
     ap.add_argument("--judge-frames", type=int, default=None, help="透傳給 run_evaluation 的 --judge-frames")
+    ap.add_argument("--notes-mode", choices=["fixed", "accumulate", "off"], default=None,
+                   help="透傳給 run_evaluation 的 --notes-mode；不給就用它自己的預設 fixed。"
+                        "accumulate 且沒給 --notes-path 時，整個批次共用同一個檔案"
+                        "（<batch_dir>/accumulated_notes.md），讓筆記真的跨題累積，不是每個子程序各自的空白檔案。")
+    ap.add_argument("--notes-path", default=None, help="透傳給 run_evaluation 的 --notes-path")
     ap.add_argument("--report-only", metavar="BATCH_DIR", help="不跑任務，只重新彙整既有批次的 report.json")
     args = ap.parse_args()
 
@@ -282,6 +287,11 @@ def main() -> None:
     batch_dir = Path(args.output_dir or f"robot_eval/results/all_{time.strftime('%Y%m%d_%H%M%S')}")
     batch_dir = batch_dir if batch_dir.is_absolute() else ROOT / batch_dir
     batch_dir.mkdir(parents=True, exist_ok=True)
+    # accumulate 模式每個任務各自是獨立子程序，run_evaluation.py 自己算的路徑（session 底下）每次
+    # 呼叫都不一樣，筆記不會真的跨題累積；在這裡把路徑固定成整個批次共用同一份，批次之間因為
+    # batch_dir 本身是新的時間戳記資料夾，天然就是「每次重跑都從空白開始」。
+    if args.notes_mode == "accumulate" and not args.notes_path:
+        args.notes_path = str(batch_dir / "accumulated_notes.md")
     (batch_dir / "driver.pid").write_text(str(os.getpid()))
     log(batch_dir, f"批次 {batch_dir.name}：{len(tasks)} 個任務 → {[t['id'] for t in tasks]}")
     log(batch_dir, f"輸出目錄：{batch_dir}")

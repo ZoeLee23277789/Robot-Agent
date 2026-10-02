@@ -22,6 +22,10 @@ coppeliaSim.log*
 logs/
 runs/
 robot_eval/results/
+# 互動模式 (RobotAgent.py) 跨任務學習寫的筆記，本機持續累積，不該進版控：否則 clone 這個 repo
+# 的人會從你（或上一個跑過的人）累積的狀態開始，不是乾淨的起點。評估用的固定筆記在
+# robot_eval/fixed_notes.md，那個會進版控，是人工審核過的，跟這個不是同一份。
+memory/body_notes.md
 snapshots/
 captures/
 *.mp4

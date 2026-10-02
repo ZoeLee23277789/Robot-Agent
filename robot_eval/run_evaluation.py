@@ -58,6 +58,12 @@ async def amain() -> None:
     ap.add_argument("--robot-token", default=os.getenv("ROBOT_SERVER_TOKEN", ""))
     ap.add_argument("--max-steps", type=int, default=30)
     ap.add_argument("--output-dir", default="robot_eval/results")
+    ap.add_argument("--notes-mode", choices=["fixed", "accumulate", "off"], default="fixed",
+                   help="跨任務的 remember() 筆記怎麼處理，見下。預設 fixed：所有題目、所有模型拿到"
+                        "完全一樣的先驗，題目順序不影響分數。accumulate：筆記在這次執行內跨題累積"
+                        "（存在 <output-dir>/<session>/accumulated_notes.md，每次執行重新從空白開始），"
+                        "當作『允許跨任務學習』的對照組。off：完全不給筆記、remember() 也不寫入。")
+    ap.add_argument("--notes-path", default=None, help="覆寫 --notes-mode 用的檔案路徑（fixed/accumulate 才有意義）")
     ap.add_argument("--no-pause", action="store_true", help="任務之間不停下來等人重置場景 (mock 模式會自動略過)")
     ap.add_argument("--rejudge", metavar="RUN_DIR", help="重新評一個既有的 run 資料夾，要搭配一個 --task")
     args = ap.parse_args()
@@ -87,6 +93,17 @@ async def amain() -> None:
 
     session = Path(args.output_dir) / time.strftime("%Y%m%d_%H%M%S")
     session.mkdir(parents=True, exist_ok=True)
+
+    # 跨任務筆記：fixed 用人工審核過的固定檔案且不寫回（所有題目、所有模型拿到一樣的先驗）；
+    # accumulate 從這次執行的空白檔案開始、跨題目真的累積，當「允許跨任務學習」的對照組；
+    # off 完全不給筆記。三種都不是 memory/body_notes.md（那個是互動模式用的，見 RobotAgent.py）。
+    if args.notes_mode == "fixed":
+        notes_path, persist_notes = args.notes_path or "robot_eval/fixed_notes.md", False
+    elif args.notes_mode == "accumulate":
+        notes_path, persist_notes = args.notes_path or str(session / "accumulated_notes.md"), True
+    else:
+        notes_path, persist_notes = None, False
+
     all_metrics = []
     for task in tasks:
         for rep in range(1, args.repeat + 1):
@@ -98,7 +115,8 @@ async def amain() -> None:
 
             run_dir = session / name
             agent = RobotAgent(task=task["description"], llm=llm, robot=robot, max_steps=args.max_steps,
-                               run_dir=str(run_dir), confirm_each_step=False, ask_human=_auto_answer)
+                               run_dir=str(run_dir), confirm_each_step=False, ask_human=_auto_answer,
+                               notes_path=notes_path, persist_notes=persist_notes)
             try:
                 result = await agent.run()
                 history = json.loads(result.model_dump_json())
@@ -110,7 +128,8 @@ async def amain() -> None:
 
     report = build_report(all_metrics)
     report["config"] = {"agent": f"{args.provider}/{llm.model}", "judge": f"{args.judge_provider}/{judge_llm.model}",
-                        "robot_mode": mode, "max_steps": args.max_steps, "repeat": args.repeat}
+                        "robot_mode": mode, "max_steps": args.max_steps, "repeat": args.repeat,
+                        "notes_mode": args.notes_mode, "notes_path": notes_path}
     (session / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     o = report["overall"]

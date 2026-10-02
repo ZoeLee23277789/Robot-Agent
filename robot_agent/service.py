@@ -129,6 +129,7 @@ class RobotAgent:
         history_items: int = 12,
         max_history_tokens: int = 6000,
         notes_path: Optional[str] = "memory/body_notes.md",
+        persist_notes: bool = True,
         planner_llm=None,
         planner_interval: int = 5,
         use_judge: bool = False,
@@ -164,7 +165,11 @@ class RobotAgent:
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         # 跨任務的長期記憶：LLM 自己探索身體之後寫下的筆記，下一個任務開始時會讀回來。
+        # persist_notes=False（評估用）：筆記照樣會進這次任務的 prompt、remember() 照樣有回應，
+        # 但不寫回磁碟——避免「第 3 題寫的筆記混進第 4~34 題的 prompt」這種題目順序污染分數，
+        # 也讓同一個 provider 跟另一個 provider 比較時，兩邊拿到的先驗完全一樣。
         self.notes_path = Path(notes_path) if notes_path else None
+        self.persist_notes = persist_notes
         prompt = (Path(__file__).parent / "system_prompt.md").read_text(encoding="utf-8")
         notes = self._load_notes()
         if notes:
@@ -451,6 +456,8 @@ class RobotAgent:
         if note in notes:
             return "already known"
         notes = (notes + [note])[-MAX_NOTES:]
+        if not self.persist_notes:
+            return f"stored ({len(notes)}/{MAX_NOTES} notes, THIS RUN ONLY — not saved to disk, will not be seen in future tasks)."
         self.notes_path.parent.mkdir(parents=True, exist_ok=True)
         self.notes_path.write_text("# Notes the robot agent wrote about its own body\n\n"
                                    + "\n".join(f"- {n}" for n in notes) + "\n", encoding="utf-8")
