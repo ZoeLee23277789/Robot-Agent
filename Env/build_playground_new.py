@@ -56,15 +56,15 @@ BALL_COLORS = [C["red"], C["yellow"], C["blue"], C["green"]]
 POS = {
     "platform": (0.6, 2.1), "slide_x": 1.3, "stairs_x": -0.6,
     "ball_pit": (-1.7, -1.1), "tunnel": (2.2, -0.4),
-    "bench": (2.6, 1.6), "bin_balls": (2.6, 0.5), "bin_blocks": (-2.6, 0.9),
+    "bench": (2.6, 1.6), "bin_balls": (-1.4, 0.7), "bin_blocks": (-2.6, 0.9),  # bin_balls 原本 (2.6, 0.5) 被長椅/泡棉樑/隧道圍住，停不到前方 30 cm
     "mat_red": (0.0, -0.5), "mat_green": (0.7, -2.0), "mat_blue": (-0.7, 0.8), "person": (1.7, -2.4),
     "pillar_red": (-2.65, -2.65), "pillar_blue": (2.65, -2.65), "pillar_yellow": (2.65, 2.65),
     "pillar_green": (-2.65, 2.65),
     "foam_cube_red": (-2.2, 2.0), "foam_cube_blue": (-1.6, 0.0), "foam_cyl_yellow": (0.2, 0.6),
     "foam_beam_green": (1.9, 1.0),
     "small_red": (-0.1, -1.6), "small_blue_1": (-2.4, 0.0), "small_blue_2": (0.9, -1.1),
-    "small_green": (-2.2, 1.4), "small_yellow": (0.7, -2.0),
-    "ball_orange": (0.9, 0.2), "ball_purple": (0.3, -1.3),
+    "small_green": (-2.2, 1.4), "small_yellow": (0.0, -2.2),  # 原本 (0.7,-2.0) 正好坐在綠墊中央，h06 一開始就成立
+    "ball_orange": (0.15, 0.0), "ball_purple": (0.36, -1.35), "ball_pink": (1.3, -2.0), "ball_cyan": (-0.8, 0.3),
 }
 VARIANTS = {
     "default": {},
@@ -307,7 +307,7 @@ def build_furniture(b, pos):
     for name in ("mat_red", "mat_green", "mat_blue"):
         base = name.split("_", 1)[1]  # "red" / "green" / "blue"：跟同色小積木共用色號
         b.static_object(name, pos[name], [
-            (f"{name}_surface", "box", [1.0, 1.0, 0.012], (0, 0, 0.006), C[base], False)])
+            (f"{name}_surface", "box", [0.6, 0.6, 0.012], (0, 0, 0.006), C[base], False)])  # 1.0 m 會蓋到橘球柱子、壓到藍色收納箱
     # 人形標記改用木色（原本用紫色，會跟 ball_purple 撞色，任務也不靠顏色辨識這個記號）
     b.static_object("person", pos["person"], [
         ("person_spot", "cyl", [0.6, 0.6, 0.012], (0, 0, 0.006), C["wood"], False)])
@@ -326,8 +326,18 @@ def build_movables(b, pos):
     for name, color in (("small_red", C["red"]), ("small_blue_1", C["blue"]), ("small_blue_2", C["blue"]),
                         ("small_green", C["green"]), ("small_yellow", C["yellow"])):
         b.dynamic_object(name, pos[name], "box", [0.07, 0.07, 0.15], color, 0.05, z=0.09)
-    b.dynamic_object("ball_orange", pos["ball_orange"], "sph", [0.08] * 3, C["orange"], 0.03, z=0.06)
-    b.dynamic_object("ball_purple", pos["ball_purple"], "sph", [0.08] * 3, C["purple"], 0.03, z=0.06)
+    # 球放在柱子上，球心對準夾爪手指板中央 z=0.144 m：手臂放到最低時手指也只到離地 0.136-0.152 m，
+    # 放在地上的球怎樣都夾不到。6 cm、摩擦 2.0、50 g 實測連續 8 次夾起帶走（見 Env/add_graspable_balls.py）。
+    for bname, bcol in (("ball_orange", C["orange"]), ("ball_purple", C["purple"]),
+                        ("ball_pink", [0.95, 0.45, 0.70]), ("ball_cyan", [0.20, 0.80, 0.85])):
+        b.static_object("tee_" + bname.split("_", 1)[1], pos[bname], [
+            ("tee_post_" + bname.split("_", 1)[1], "cyl", [0.03, 0.03, 0.114], (0, 0, 0.057), [0.15, 0.15, 0.15], True)])
+        hb = b.dynamic_object(bname, pos[bname], "sph", [0.06] * 3, bcol, 0.05, z=0.145)
+        try:
+            b.sim.setEngineFloatParam(b.sim.bullet_body_friction, hb, 2.0)
+            b.sim.setEngineFloatParam(b.sim.ode_body_friction, hb, 2.0)
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------------ 機器人

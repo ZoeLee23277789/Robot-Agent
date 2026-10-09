@@ -59,8 +59,12 @@ JUDGE_SYSTEM = (
     "Images labelled 'overhead camera' come from a fixed camera above the room looking straight down; the robot "
     "itself appears in them from above. An object that is visible there, or that the log shows was located from "
     "the overhead camera with world coordinates, counts as seen/found for milestones about seeing or locating it. "
-    "The step log lists, from telemetry, which fixed landmarks (pillars, tunnel, ball pit, ...) were inside the front "
-    "camera's field of view at each step; treat that as ground truth for what was visible when, e.g. for scan/order tasks. "
+    "The step log lists, from telemetry, which fixed landmarks (pillars, tunnel, ball pit, ...) were within the front "
+    "camera's field-of-view ANGLE at each step. That is angle only: a landmark in that list can still be hidden behind "
+    "other objects (the slide, the platform, a wall corner). Treat a landmark that is NOT in the list as not visible, but "
+    "for one that IS in the list, decide from the image whether it was actually visible before blaming the agent for "
+    "not reporting it. An agent that truthfully reports only what its images showed has not failed by omitting a "
+    "landmark that was occluded. "
     "The image sample may not include every step: if the step log shows an action that would plausibly have produced "
     "the evidence at a step whose image is not shown, say so in your reasoning instead of treating the missing image as "
     "proof that it never happened."
@@ -210,10 +214,22 @@ def check_report(milestone: dict, history: dict) -> Optional[MilestoneResult]:
         low = text.lower()
         reported = sorted(((low.find(n.split("_")[-1]), n) for n in names if n.split("_")[-1] in low))
         reported = [n for _, n in reported]
-        ok = len(seen) >= int(cond.get("min_seen", 1)) and reported == seen
+        # 「進入視野」只是用方位角算的，不知道有沒有被擋住：2026-10-07 的 e07，yaw -97.5 時黃柱子在
+        # +43.5°（視野邊緣），但被滑梯擋住，畫面裡根本沒有；agent 照實回報藍、紅、綠，舊的「整串
+        # 相等」判定卻判它錯。所以遙測只能確認兩件事：報出來的每一根都真的轉進過視野（沒有憑空捏造），
+        # 而且相對順序對（10/6 那次在過期畫面下報成藍、綠、紅、黃，綠在紅前面，這裡照樣抓得到）。
+        # 少報被擋住的那根不算錯；至少要報 min_seen 根。
+        pos = {n: i for i, n in enumerate(seen)}
+        in_view = all(n in pos for n in reported)
+        in_order = in_view and [pos[n] for n in reported] == sorted(pos[n] for n in reported)
+        ok = len(reported) >= int(cond.get("min_seen", 1)) and in_order
+        why = ("ok" if ok else
+               "reports a pillar that never entered the view" if not in_view else
+               "relative order differs from telemetry" if not in_order else
+               "fewer pillars reported than min_seen")
         return MilestoneResult(milestone["id"], milestone["description"], ok, "report",
-                               f"telemetry says the landmarks entered the camera view in this order: {seen}; "
-                               f"the report lists them as: {reported}")
+                               f"telemetry says the landmarks entered the camera view in this order: {seen} "
+                               f"(angle only, occlusion unknown); the report lists them as: {reported} -> {why}")
     return None
 
 
@@ -221,7 +237,7 @@ def _step_log(history: dict) -> str:
     lines = []
     for s in history.get("steps", []):
         lines.append(f"[step {s['step']}] telemetry={json.dumps(s.get('state_before', {}))}")
-        lines.append(f"  fixed landmarks inside the front camera's field of view at this step (from telemetry): "
+        lines.append(f"  fixed landmarks within the front camera's field-of-view angle at this step (telemetry, angle only, may be occluded): "
                      f"{_landmarks_in_view(s.get('state_before'))}")
         if s.get("error"):
             lines.append(f"  error: {s['error']}")
@@ -230,7 +246,7 @@ def _step_log(history: dict) -> str:
         for a in s.get("actions", []):
             lines.append(f"  action {a['name']}({json.dumps(a['params'])}) -> {'ok' if a['ok'] else 'FAILED'}: {a['message']}")
     lines.append(f"[final] telemetry={json.dumps(history.get('final_state', {}))}")
-    lines.append(f"  fixed landmarks inside the front camera's field of view at the end (from telemetry): "
+    lines.append(f"  fixed landmarks within the front camera's field-of-view angle at the end (telemetry, angle only, may be occluded): "
                  f"{_landmarks_in_view(history.get('final_state'))}")
     lines.append(f"[agent's final report, NOT evidence] success={history.get('success')} text={history.get('final_text', '')!r}")
     return "\n".join(lines)

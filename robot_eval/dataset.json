@@ -164,9 +164,9 @@
         },
         {
           "id": "m2",
-          "description": "The final report says there are four different ball colours",
+          "description": "The final report says there are eight different ball colours (pink, green, purple, red, orange, blue, yellow, cyan in the loaded Capstone_Playground.ttt)",
           "report": {
-            "regex": "\\b(4|four)\\b"
+            "regex": "\\b(8|eight)\\b"
           }
         }
       ]
@@ -217,12 +217,11 @@
       "milestones": [
         {
           "id": "m1",
-          "description": "The report lists the corner pillars in the order they entered the camera view during the scan (at least two pillars), per telemetry",
+          "description": "The report lists the corner pillars in the order they entered the camera view during the scan (at least two pillars), per telemetry. From the start position the yellow pillar stays hidden behind the platform during an in-place scan (checked in the camera images of two runs), so only red, blue and green count; mentioning yellow neither helps nor hurts",
           "report": {
             "landmark_order": [
               "pillar_red",
               "pillar_blue",
-              "pillar_yellow",
               "pillar_green"
             ],
             "min_seen": 2

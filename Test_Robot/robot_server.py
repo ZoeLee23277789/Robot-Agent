@@ -1267,8 +1267,45 @@ class RoboMasterBackend(object):
                 break
         return img
 
+    def _sim_front_image(self):
+        """sim 模式：直接向模擬器讀機器人自己的視覺感測器，不走 SDK 的 H.264 串流。
+
+        2026-10-07 實測：SDK 串流在 headless 模擬器下旋轉完第一張就是新畫面，但 10/6 那批用 GUI 版
+        跑時，e07 連續四步每一步的畫面都停在「上一次轉向之前」（yaw 174.9 時紅柱子該在正前方，畫面
+        卻是牆；下一步才出現紅柱子），整批 21 次大角度旋轉裡也有 6 次轉完畫面幾乎一模一樣。_fresh_image
+        用固定的時鐘上限（總共 4 秒、每張 1.5 秒）等新畫面，模擬一慢就在新畫面到之前放棄、默默回傳舊的，
+        agent 看著舊畫面寫出「看到綠柱子」之類的錯誤回報。這裡讀的是模擬器當下的影像，跟模擬速度無關。
+        跟穩定後的 SDK 畫面比對：上下、左右都翻轉後差異 3.4（JPEG 雜訊等級），其他方向都在 47 以上。
+        實體機器人沒有這條路，照舊走 SDK。"""
+        if self.mode != "sim" or os.environ.get("ROBOT_FRONT_CAMERA_SOURCE", "sim") == "sdk":
+            return None
+        sim = getattr(self, "_sim_for_overhead", None)
+        cam = getattr(self, "_robot_cam", -1)
+        if sim is None or cam is None or cam == -1:
+            return None
+        with self._sim_for_overhead_lock:
+            buf, res = sim.getVisionSensorImg(cam)
+        img = np.frombuffer(buf, dtype=np.uint8).reshape(res[1], res[0], 3)
+        return cv2.flip(cv2.cvtColor(img, cv2.COLOR_RGB2BGR), -1)
+
     def frame_jpeg(self, width=640, quality=80, raw=False):
-        if not self._camera_ok or cv2 is None:
+        if cv2 is None:
+            return None
+        if not raw:
+            try:
+                img = self._sim_front_image()
+            except Exception as e:
+                print("[server] 直接讀模擬器前方相機失敗，退回 SDK 串流：%s" % e)
+                img = None
+            if img is not None:
+                self._camera_fail_streak = 0
+                self._camera_live_ok = True
+                h, w = img.shape[:2]
+                if w > width:
+                    img = cv2.resize(img, (width, int(h * width / float(w))))
+                ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+                return buf.tobytes() if ok else None
+        if not self._camera_ok:
             return None
         try:
             img = self._fresh_image(raw)

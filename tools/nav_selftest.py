@@ -86,7 +86,7 @@ class Truth:
         hd = math.degrees(math.atan2((fl[1] + fr[1]) / 2 - (rl[1] + rr[1]) / 2, (fl[0] + fr[0]) / 2 - (rl[0] + rr[0]) / 2))
         return p[0], p[1], hd
 
-    def objects(self, prefixes=("small_", "ball_orange", "ball_purple", "foam_")):
+    def objects(self, prefixes=("small_", "ball_orange", "ball_purple", "ball_pink", "ball_cyan", "foam_")):
         out = {}
         for o in self.sim.getObjectsInTree(self.sim.handle_scene, sim_shape(self.sim), 0):
             a = self.sim.getObjectAlias(o)

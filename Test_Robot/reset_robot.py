@@ -28,7 +28,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from build_playground_new import POS, ROBOT_HEADING, ROBOT_START, world_aabb  # noqa: E402
 
 MOVABLE = ("foam_cube_red", "foam_cube_blue", "foam_cyl_yellow", "foam_beam_green",
-           "small_red", "small_blue_1", "small_blue_2", "small_green", "small_yellow", "ball_orange", "ball_purple")
+           "small_red", "small_blue_1", "small_blue_2", "small_green", "small_yellow",
+           "ball_orange", "ball_purple", "ball_pink", "ball_cyan")
 
 
 def reset_objects(sim, scale=1.0):
@@ -45,9 +46,17 @@ def reset_objects(sim, scale=1.0):
         p = sim.getObjectPosition(h, sim.handle_world)
         zmin = sim.getObjectFloatParam(h, sim.objfloatparam_objbbox_min_z)
         zmax = sim.getObjectFloatParam(h, sim.objfloatparam_objbbox_max_z)
+        z = (zmax - zmin) / 2 + 0.002
+        # 球放在自己的柱子（tee_<顏色>）上：位置跟高度都以柱子為準，不是放回地上
+        color = name.split("_", 1)[1]
+        tee = (shapes.get("tee_post_" + color) or shapes.get("tee_" + color)) if name.startswith("ball_") else None
+        if tee is not None:
+            tp = sim.getObjectPosition(tee, sim.handle_world)
+            ttop = tp[2] + sim.getObjectFloatParam(tee, sim.objfloatparam_objbbox_max_z)
+            x, y, z = tp[0], tp[1], ttop + (zmax - zmin) / 2 + 0.001
         d = math.hypot(p[0] - x, p[1] - y)
         sim.setObjectOrientation(h, [0.0, 0.0, 0.0], sim.handle_world)
-        sim.setObjectPosition(h, [x, y, (zmax - zmin) / 2 + 0.002], sim.handle_world)
+        sim.setObjectPosition(h, [x, y, z], sim.handle_world)
         try:
             sim.resetDynamicObject(h)
         except Exception:

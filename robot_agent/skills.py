@@ -217,11 +217,65 @@ async def _tof(robot):
     return None if (t is None or t == 9999) else int(t)
 
 
+# 球的顏色 -> PIL HSV 的色相（0-255）。場景裡的四顆球：橘、紫、粉紅、青。
+_BALL_HUE = {"orange": 19, "purple": 200, "violet": 200, "pink": 234, "magenta": 234, "cyan": 131, "teal": 131,
+             "red": 0, "yellow": 35, "green": 85, "blue": 160}
+
+
+def _ball_offset_mm(jpg: Optional[bytes], obj: str) -> Optional[float]:
+    """抓取姿態、感測器讀柱子約 200 mm 時，用目標顏色的像素算球在夾爪中心左邊(+)或右邊(-)幾 mm。
+    2026-10-08 校正（紫色球，模擬器真值）：球心像素 x=322.7 時正好在兩爪中間，每偏 1 px 約 1.13 mm；
+    只認目標顏色，旁邊的紅積木、球池才不會把平均位置拉走。找不到顏色就回傳 None（不修正）。"""
+    hue = next((h for word, h in _BALL_HUE.items() if word in obj.lower()), None)
+    if hue is None or not jpg:
+        return None
+    try:
+        import io
+        import numpy as np
+        from PIL import Image
+        a = np.asarray(Image.open(io.BytesIO(jpg)).convert("HSV"), dtype=np.float32)
+        h, w = a.shape[:2]
+        d = np.abs(a[..., 0] - hue); d = np.minimum(d, 255 - d)
+        # 色相容許 ±8：±18 時橘色會吃進黃色泡棉圓柱、黃紅樓梯（2026-10-08 量到 -72 mm、實際 +33 mm，轉錯方向）
+        m = ((a[..., 1] > 90) & (a[..., 2] > 60) & (d < 8)).astype(np.uint8)
+        m[: int(h * 0.45)] = 0
+        import cv2
+        n, _, stats, cents = cv2.connectedComponentsWithStats(m, 8)
+        if n <= 1:
+            return None
+        k = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))     # 最大的一塊：近處的目標球，不是球池裡同色的小球
+        if stats[k, cv2.CC_STAT_AREA] < 150:
+            return None
+        return -(float(cents[k][0]) * 640.0 / w - 322.7) * 1.13
+    except Exception:
+        return None
+
+
+def _held_in_view(jpg: Optional[bytes]) -> float:
+    """抬起之後，夾爪框底部那一小塊畫面裡「有顏色的像素」比例。相機裝在手臂上，夾住的東西跟相機一起動，
+    會一直卡在這個窗口裡；地板、牆、柱子都是灰黑色。2026-10-07 實測：夾著 6 cm 球 0.18、空夾 0.00。
+    積木一般靠前方距離感測器驗證就夠；球放在柱子上，抬起後就離開感測器光束（光束在 0.10 m 高），
+    感測器只看得到留在原地的柱子，所以要靠這個。"""
+    if not jpg:
+        return 0.0
+    try:
+        import io
+        import numpy as np
+        from PIL import Image
+        im = Image.open(io.BytesIO(jpg)).convert("HSV")
+        w, h = im.size
+        a = np.asarray(im, dtype=np.float32)[int(h * 330 / 360):h, int(w * 260 / 640):int(w * 380 / 640)]
+        return float(((a[..., 1] > 90) & (a[..., 2] > 60)).mean())
+    except Exception:
+        return 0.0
+
+
 async def pick(robot, llm, obj: str) -> Tuple[bool, str]:
     """抓起一個物件：站到它前面 → 張開、放低手臂 → 用距離感測器一步步把它送進指間 → 關夾爪、抬起 →
     倒退 0.25 m 驗證（物件在手上，感測器讀值不會變；還在地上就會變遠或消失）。整個流程 LLM 不用介入。
-    兩段目標距離：先到 95 mm（積木前緣在指尖內約 4 cm；實測 83-95 mm 全部成功、119 mm 會把積木推走），
-    沒夾到就再深到 80 mm。"""
+    兩段目標距離：積木先到 95 mm（積木前緣在指尖內約 4 cm；實測 83-95 mm 全部成功、119 mm 會把積木推走），
+    沒夾到就再深到 80 mm；球（放在柱子上）底盤送到 125 mm 以內、再用手臂往前伸補到等效 110 mm。驗證用距離感測器或手臂相機的
+    夾爪窗口，任一成立即可。"""
     xy, kind, note = await resolve_target(robot, llm, obj)
     if xy is None:
         return False, f"pick({obj}): {note}"
@@ -230,8 +284,14 @@ async def pick(robot, llm, obj: str) -> Tuple[bool, str]:
     if not res.get("ok"):
         return False, f"pick({obj}) {where}: could not reach it — {res.get('message')}"
     attempts = []
-    # 目標距離：實測 83-90 mm 四次全成功、119 mm 兩次一次失敗（指尖剛好碰到前緣，關上會把物件推走）
-    for target_mm in (95, 80):
+    # 目標距離：積木實測 83-90 mm 四次全成功、119 mm 兩次一次失敗（指尖剛好碰到前緣，關上會把物件推走）。
+    # 球放在柱子上，感測器量到的是柱子；送到 95 mm 時夾爪前方的橫桿會碰到球上半部、把球推下柱子，
+    # 所以停在 120 mm（球剛好在兩個爪尖之間）就關，實測 6 cm 球連續 8 次夾起。
+    is_ball = "ball" in obj.lower()
+    # 球：底盤先送到 125 mm 以內，再用手臂往前伸補到「等效 110 mm」。底盤一步最少 2 cm（再小會被當成沒動而拒絕），
+    # 停下來的讀值會落在 111-119 mm 之間；2026-10-08 用模擬器真值量：關夾時 111-112 mm（球在爪尖後 58 mm）夾得起來，
+    # 117-119 mm（65-67 mm）爪子會往上滑過球。手臂可以一次只伸幾 mm，所以剩下的深度交給它。
+    for target_mm in ((125, 120) if is_ball else (95, 80)):
         await robot.act("gripper", {"state": "open"})
         await _snap(robot, "pick: gripper opened")
         r = await robot.act("arm_to", {"x_mm": ARM_GRASP[0], "y_mm": ARM_GRASP[1]})
@@ -239,6 +299,38 @@ async def pick(robot, llm, obj: str) -> Tuple[bool, str]:
             await robot.act("recenter_arm", {})
             return False, f"pick({obj}) {where}: could not lower the arm — {r.get('message')}"
         tof = await _tof(robot)
+        if is_ball:
+            # 先用相機把車頭轉正再看感測器：柱子只有 3 cm 粗，站位處感測器光錐左右只有約 3.4 cm，車頭偏一點就讀 9999，
+            # 原本會直接放棄（2026-10-08 橘球兩次這樣失敗）。像素轉角度：校正時 1.13 mm/px、球離車心約 0.38 m → 約 0.17°/px。
+            for _ in range(2):
+                off = _ball_offset_mm(await robot.frame(), obj)
+                if off is None:
+                    break
+                deg = off / 1.13 * 0.17
+                if abs(deg) < 1.5:
+                    break
+                await robot.act("move_chassis", {"forward_m": 0, "right_m": 0,
+                                                 "turn_left_deg": max(2.0, round(abs(deg))) * (1 if deg > 0 else -1)})
+                await asyncio.sleep(0.3)
+            tof = await _tof(robot)
+            # 左右對準：偏超過約 1.4 cm 時，先碰到球的那一側爪子會把球推下柱子（紫色球從東側接近每次偏 14 mm、每次失敗）。
+            # 先送到感測器讀柱子約 200 mm，再用目標顏色量偏差；校正時每轉 2° 球左右移約 13 mm，所以 1° ≈ 6.3 mm。
+            for _ in range(6):
+                if tof is None or tof <= 215:
+                    break
+                r = await robot.act("move_chassis", {"forward_m": round(min(0.10, max(0.02, (tof - 200) / 1000.0)), 2),
+                                                     "right_m": 0, "turn_left_deg": 0, "push": True})
+                if not r.get("ok"):
+                    break
+                tof = await _tof(robot)
+            for _ in range(2):
+                off = _ball_offset_mm(await robot.frame(), obj)
+                if off is None or abs(off) < 8:
+                    break
+                turn = max(2.0, round(abs(off) / 6.3)) * (1 if off > 0 else -1)
+                await robot.act("move_chassis", {"forward_m": 0, "right_m": 0, "turn_left_deg": turn})
+                await asyncio.sleep(0.3)
+            tof = await _tof(robot)
         for _ in range(10):
             if tof is None or tof <= target_mm:
                 break
@@ -254,22 +346,48 @@ async def pick(robot, llm, obj: str) -> Tuple[bool, str]:
                            f"{tof if tof is not None else 9999} mm with the arm lowered; attempts so far: {attempts}). "
                            f"It may have been pushed aside or be too low for the sensor; locate it again and retry.")
         tof_before = tof
+        if is_ball:
+            reach = max(0, min(20, tof - 110))
+            if reach >= 2:
+                await robot.act("arm_to", {"x_mm": ARM_GRASP[0] + reach, "y_mm": ARM_GRASP[1]})
+                await asyncio.sleep(0.3)
         await robot.act("gripper", {"state": "close"})
         await _snap(robot, "pick: gripper closed on the object")
-        await asyncio.sleep(0.5)
+        # 球是圓的，夾爪還沒合緊就抬起會滑掉：實測等 1.5 s 才抬 8/8 夾起，pick 原本的 0.5 s 三顆球兩顆掉
+        await asyncio.sleep(1.5 if is_ball else 0.5)
         await robot.act("move_arm", {"forward_mm": 0, "up_mm": 60})
         await _snap(robot, "pick: lifted")
         await robot.act("move_chassis", {"forward_m": -0.25, "right_m": 0, "turn_left_deg": 0})
         await asyncio.sleep(0.3)
         tof_after = await _tof(robot)
-        attempts.append(f"closed at {tof_before} mm -> {tof_after if tof_after is not None else 9999} mm after backing up")
-        if tof_after is not None and abs(tof_after - tof_before) <= 60:
+        in_view = _held_in_view(await robot.frame())
+        attempts.append(f"closed at {tof_before} mm -> {tof_after if tof_after is not None else 9999} mm after backing up, "
+                        f"gripper window {in_view:.2f} coloured")
+        by_tof = tof_after is not None and abs(tof_after - tof_before) <= 60
+        if by_tof or in_view >= 0.05:
             await robot.act("arm_to", {"x_mm": ARM_CARRY[0], "y_mm": ARM_CARRY[1]})
             await asyncio.sleep(0.3)
-            await robot.act("set_held", {"tof_mm": await _tof(robot)})  # 搬運姿態下物件在感測錐裡，導航要忽略這個讀值
-            return True, (f"pick({obj}) {where}: GRASPED — front sensor read {tof_before} mm before lifting and {tof_after} mm "
-                          f"after backing up 0.25 m, so the object moved with the robot. Arm is in the carry position; keep "
-                          f"the gripper closed and use place(target) to put it down.")
+            if not by_tof:
+                # 只靠相機判定的（球）在搬運姿態再看一次：2026-10-08 實測，球被夾在抓取高度拖著走、其實沒被抬起時，
+                # 倒退後的畫面也會有 13-14% 的顏色，但收手臂時就掉了；搬運姿態下真夾住 0.25、掉了 0.00。
+                await asyncio.sleep(0.5)
+                carry_view = _held_in_view(await robot.frame())
+                if carry_view < 0.05:
+                    attempts[-1] += f", but it slipped out when the arm moved to the carry pose ({carry_view:.2f} coloured)"
+                    in_view = 0.0
+            if not (by_tof or in_view >= 0.05):
+                await robot.act("gripper", {"state": "open"})
+                await robot.act("arm_to", {"x_mm": ARM_GRASP[0], "y_mm": ARM_GRASP[1]})
+                await robot.act("move_chassis", {"forward_m": 0.25, "right_m": 0, "turn_left_deg": 0, "push": True})
+                continue
+            # 搬運姿態下積木在感測錐裡，導航要忽略那個讀值；球在光束上方，感測器看不到它，不用遮
+            await robot.act("set_held", {"tof_mm": await _tof(robot) if by_tof else None})
+            why = (f"front sensor read {tof_before} mm before lifting and {tof_after} mm after backing up 0.25 m"
+                   if by_tof else
+                   f"after lifting and backing up 0.25 m the object is still between the fingers in the arm camera "
+                   f"({in_view:.0%} of the gripper window is the object's colour)")
+            return True, (f"pick({obj}) {where}: GRASPED — {why}, so the object moved with the robot. Arm is in the carry "
+                          f"position; keep the gripper closed and use place(target) to put it down.")
         # 沒夾到：放掉、手臂放回抓取姿態、走回去再試更深一點
         await robot.act("gripper", {"state": "open"})
         await robot.act("arm_to", {"x_mm": ARM_GRASP[0], "y_mm": ARM_GRASP[1]})
@@ -277,8 +395,14 @@ async def pick(robot, llm, obj: str) -> Tuple[bool, str]:
     await robot.act("gripper", {"state": "close"})
     await robot.act("set_held", {"tof_mm": None})
     await robot.act("recenter_arm", {})
+    if is_ball:
+        # h09（2026-10-08）：球掉下柱子後 agent 花了 26 步追一顆在地上的球；手指最低在離地 0.136 m，地上的球夾不起來
+        return False, (f"pick({obj}) {where}: the gripper closed twice but the ball did NOT come along ({'; '.join(attempts)}). "
+                       f"Balls are only graspable while they sit on their posts; if it fell off onto the floor this gripper "
+                       f"cannot reach it (the fingers are at least 0.136 m above the floor). Check with locate_overhead whether "
+                       f"it is still at its post's position: if it moved, do not chase it — report the failure honestly.")
     return False, (f"pick({obj}) {where}: the gripper closed twice but the object did NOT come along ({'; '.join(attempts)}); "
-                   f"it is still on the floor (balls roll away easily). Locate it again and retry pick({obj}).")
+                   f"it was not carried along (it may have rolled or been pushed away). Locate it again and retry pick({obj}).")
 
 
 async def place(robot, llm, target: str) -> Tuple[bool, str]:

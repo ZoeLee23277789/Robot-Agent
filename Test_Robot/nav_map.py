@@ -128,7 +128,14 @@ class NavMap(object):
         （約 1500 次 zmq 呼叫、10 秒），場景沒改的話直接讀快取，減少對 CoppeliaSim 的負載與啟動時間。"""
         try:
             scene = self.sim.getStringParam(self.sim.stringparam_scene_path_and_name)
-            mtime = int(os.path.getmtime(scene)) if scene and os.path.exists(scene) else 0
+            # headless 用相對路徑啟動（./coppeliaSim -h scenes/xxx.ttt）時，這裡拿到的是相對於 CoppeliaSim
+            # 安裝目錄的路徑，從 robot_server 的工作目錄找不到檔案，修改時間就一直是 0，快取永遠不會失效：
+            # 2026-10-07 改場景（加柱子、搬收納箱）存檔後，地圖照樣從舊快取載入。補成完整路徑；還是找不到就不用快取。
+            if scene and not os.path.isabs(scene):
+                scene = os.path.join(self.sim.getStringParam(self.sim.stringparam_application_path), scene)
+            if not scene or not os.path.exists(scene):
+                return None
+            mtime = int(os.path.getmtime(scene))
             key = hashlib.md5(("%s|%d|%s|%s|%s|v4" % (scene, mtime, CELL, ROBOT_RADIUS, PASSAGE_EXTEND)).encode()).hexdigest()[:12]
             return os.path.join(tempfile.gettempdir(), "robot_nav_static_%s.npz" % key)
         except Exception:
