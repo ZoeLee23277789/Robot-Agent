@@ -20,7 +20,7 @@ from coppeliasim_zmqremoteapi_client import RemoteAPIClient
 NAME = "overhead_cam"
 HEIGHT = 4.5          # 攝影機離地高度 (m)，隨便多高都行，只要看得到整個房間，跟世界座標換算無關
 ORTHO_SIZE = 7.0       # 正交視野寬度 (m)，要蓋過 build_playground_new.py 的 ROOM=6.0 留一點邊界
-RESOLUTION = 512
+RESOLUTION = 1024   # 2026-10-21 從 512 提高：512 px 涵蓋 7 m 時一顆 6 cm 的球只有 4 px，俯視指向模型分不出球跟積木
 
 
 def remove_old(sim):

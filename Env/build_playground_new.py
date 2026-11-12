@@ -60,12 +60,24 @@ POS = {
     "mat_red": (0.0, -0.5), "mat_green": (0.7, -2.0), "mat_blue": (-0.7, 0.8), "person": (1.7, -2.4),
     "pillar_red": (-2.65, -2.65), "pillar_blue": (2.65, -2.65), "pillar_yellow": (2.65, 2.65),
     "pillar_green": (-2.65, 2.65),
-    "foam_cube_red": (-2.2, 2.0), "foam_cube_blue": (-1.6, 0.0), "foam_cyl_yellow": (0.2, 0.6),
+    "foam_cube_red": (-2.2, 2.0), "foam_cube_blue": (-1.6, 0.0), "foam_cyl_yellow": (0.3, 0.5),  # 黃圓柱原本 (0.2, 0.6) 跟 add_arm_lift 的桌子重疊，開播就被彈倒、滾去撞掉橘球（2026-11-06）
     "foam_beam_green": (1.9, 1.0),
     "small_red": (-0.1, -1.6), "small_blue_1": (-2.4, 0.0), "small_blue_2": (0.9, -1.1),
     "small_green": (-2.2, 1.4), "small_yellow": (0.0, -2.2),  # 原本 (0.7,-2.0) 正好坐在綠墊中央，h06 一開始就成立
     "ball_orange": (0.15, 0.0), "ball_purple": (0.36, -1.35), "ball_pink": (1.3, -2.0), "ball_cyan": (-0.8, 0.3),
+    "table": (0.0, 0.8), "ball_lime": (0.0, 0.8),   # 矮桌與桌上的球（手臂升降柱的目標，見 Env/add_arm_lift.py）
+    # 垃圾桶與垃圾（Env/add_litter.py）：桶子 0.35 m 並排在東南角；一瓶一罐藏在平台底下
+    "bin_trash": (1.85, -1.95), "bin_recycle": (2.45, -1.95),
+    "trash_bottle_1": (0.10, 2.10), "trash_bottle_2": (-0.30, -1.15), "trash_can_1": (0.60, -2.45),
+    "trash_can_2": (1.20, 2.20), "trash_cup_1": (-1.70, -2.45), "trash_carton_1": (1.60, -2.55),
 }
+LITTER = {  # name -> (kind, size, colour, mass)：全部 >= 16 cm 高、<= 7 cm 寬，夾爪才夾得到
+    # 全部方柱：夾爪腳本要兩根手指都碰到才掛接，圓柱掛不上開車會掉（見 Env/add_litter.py）
+    "trash_bottle_1": ("box", [0.07, 0.07, 0.20], [0.30, 0.80, 0.95], 0.08), "trash_bottle_2": ("box", [0.07, 0.07, 0.20], [0.30, 0.80, 0.95], 0.08),
+    "trash_can_1": ("box", [0.065, 0.065, 0.20], [0.85, 0.15, 0.55], 0.08), "trash_can_2": ("box", [0.065, 0.065, 0.20], [0.85, 0.15, 0.55], 0.08),
+    "trash_cup_1": ("box", [0.07, 0.07, 0.16], [0.78, 0.78, 0.78], 0.04), "trash_carton_1": ("box", [0.07, 0.07, 0.18], [0.35, 0.22, 0.12], 0.05),
+}
+TABLE_SIZE, TABLE_H = 0.26, 0.33   # 桌面要小：夾爪中心只在車頭前約 0.15 m，球在正中央才夠得到（見 Env/add_arm_lift.py）
 VARIANTS = {
     "default": {},
     "hidden_red": {"small_red": (2.1, 2.3)},         # 長椅北側、平台東邊，從起點看不到
@@ -266,8 +278,14 @@ def build_ball_pit(b, inner_x, inner_y, wall_h, wall_t, seed):
     for k in range(60):
         x = rng.uniform(-inner_x / 2 + d, inner_x / 2 - d)
         y = rng.uniform(-inner_y / 2 + d, inner_y / 2 - d)
-        b.dynamic_object(f"pit_ball_{k}", (cx + x, cy + y), "sph", [d] * 3, rng.choice(BALL_COLORS), 0.03,
-                         z=0.02 + d * 1.5 + rng.uniform(0, 0.05), parent=g)
+        h = b.dynamic_object(f"pit_ball_{k}", (cx + x, cy + y), "sph", [d] * 3, rng.choice(BALL_COLORS), 0.03,
+                             z=0.02 + d * 1.5 + rng.uniform(0, 0.05), parent=g)
+        # 2026-11-11：球池的球只是給人看的（沒有任務會拿它），60 顆動態球佔掉模擬一半的物理算力（0.65→0.92 倍即時），
+        # 建好後設成靜態。要讓它們落到堆好的位置再凍結：先播放幾秒再在停止狀態存檔。
+        try:
+            b.sim.setObjectInt32Param(h, b.sim.shapeintparam_static, 1)
+        except Exception:
+            pass
 
 
 def build_tunnel(b):
@@ -304,6 +322,8 @@ def build_furniture(b, pos):
     ], yaw=math.pi / 2)
     open_box(b, "bin_balls", pos["bin_balls"], 0.45, 0.08, C["blue"])
     open_box(b, "bin_blocks", pos["bin_blocks"], 0.45, 0.08, C["orange"])
+    open_box(b, "bin_trash", pos["bin_trash"], 0.35, 0.08, [0.10, 0.10, 0.10])      # 黑色一般垃圾桶
+    open_box(b, "bin_recycle", pos["bin_recycle"], 0.35, 0.08, C["white"])        # 白色回收桶
     for name in ("mat_red", "mat_green", "mat_blue"):
         base = name.split("_", 1)[1]  # "red" / "green" / "blue"：跟同色小積木共用色號
         b.static_object(name, pos[name], [
@@ -316,6 +336,9 @@ def build_furniture(b, pos):
         b.static_object(name, pos[name], [
             (f"{name}_body", "cyl", [0.30, 0.30, 1.0], (0, 0, 0.5), col, True),
             (f"{name}_cap", "cyl", [0.34, 0.34, 0.06], (0, 0, 1.03), C["black"], True)])
+    # 矮桌（2026-10-20）：實心方塊、底面貼地，導航地圖會把它當障礙；桌面高度就是手臂升降柱要升的高度（Env/add_arm_lift.py）
+    b.static_object("table", pos["table"], [
+        ("table_body", "box", [TABLE_SIZE, TABLE_SIZE, TABLE_H], (0, 0, TABLE_H / 2), C["wood"], True)])
 
 
 def build_movables(b, pos):
@@ -338,6 +361,19 @@ def build_movables(b, pos):
             b.sim.setEngineFloatParam(b.sim.ode_body_friction, hb, 2.0)
         except Exception:
             pass
+    # 垃圾（收拾類任務）：跟小積木同一套 pick 流程，夾的是 0.136-0.152 m 那一段
+    for name, (kind, size, color, mass) in LITTER.items():
+        b.dynamic_object(name, pos[name], kind, size, color, mass)   # 摩擦用預設（跟小積木一樣）
+    # 桌上的球：柱子跟球心離桌面的高度跟地上的球一樣，升降柱升到桌面高度後 pick 的流程完全相同；
+    # 萊姆綠是場景裡沒有的色相，pick 用顏色對準車頭時不會被別的東西拉走
+    b.static_object("tee_lime", pos["ball_lime"], [
+        ("tee_post_lime", "cyl", [0.03, 0.03, 0.114], (0, 0, TABLE_H + 0.057), [0.15, 0.15, 0.15], True)])
+    hb = b.dynamic_object("ball_lime", pos["ball_lime"], "sph", [0.06] * 3, [0.62, 0.95, 0.12], 0.05, z=TABLE_H + 0.145)
+    try:
+        b.sim.setEngineFloatParam(b.sim.bullet_body_friction, hb, 2.0)
+        b.sim.setEngineFloatParam(b.sim.ode_body_friction, hb, 2.0)
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------ 機器人
