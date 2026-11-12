@@ -1,0 +1,1116 @@
+{
+ "summary": {
+  "yaw_max_deg": 120,
+  "yaw_min_deg": -120,
+  "roll_max_deg": 90,
+  "roll_min_deg": -90
+ },
+ "steps": [
+  {
+   "axis": "yaw",
+   "target_deg": 10,
+   "measured_deg": 9.7,
+   "servo1": 1937,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 146,
+    "y": 25,
+    "z": 248,
+    "pitch": -0.5,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     1937,
+     2497,
+     1329,
+     1784,
+     2046,
+     1366
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 20,
+   "measured_deg": 19.7,
+   "servo1": 1824,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 140,
+    "y": 50,
+    "z": 248,
+    "pitch": -0.5,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     1824,
+     2497,
+     1329,
+     1784,
+     2046,
+     1366
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 30,
+   "measured_deg": 29.8,
+   "servo1": 1709,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 129,
+    "y": 74,
+    "z": 248,
+    "pitch": -0.6,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     1709,
+     2496,
+     1329,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 40,
+   "measured_deg": 39.6,
+   "servo1": 1597,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 115,
+    "y": 95,
+    "z": 248,
+    "pitch": -0.6,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     1597,
+     2496,
+     1329,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 50,
+   "measured_deg": 50.2,
+   "servo1": 1478,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 95,
+    "y": 114,
+    "z": 248,
+    "pitch": -0.6,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     1478,
+     2496,
+     1329,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 60,
+   "measured_deg": 59.8,
+   "servo1": 1367,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 75,
+    "y": 129,
+    "z": 248,
+    "pitch": -0.6,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     1367,
+     2496,
+     1329,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 70,
+   "measured_deg": 70.0,
+   "servo1": 1252,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 51,
+    "y": 140,
+    "z": 248,
+    "pitch": -0.6,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     1252,
+     2496,
+     1329,
+     1784,
+     2046,
+     1366
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 80,
+   "measured_deg": 79.9,
+   "servo1": 1139,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 26,
+    "y": 146,
+    "z": 248,
+    "pitch": -0.6,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     1139,
+     2496,
+     1329,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 90,
+   "measured_deg": 90.0,
+   "servo1": 1026,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 0,
+    "y": 149,
+    "z": 248,
+    "pitch": -0.6,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     1026,
+     2496,
+     1329,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 100,
+   "measured_deg": 99.7,
+   "servo1": 913,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": -25,
+    "y": 147,
+    "z": 248,
+    "pitch": -0.6,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     913,
+     2496,
+     1329,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 110,
+   "measured_deg": 109.7,
+   "servo1": 799,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": -50,
+    "y": 140,
+    "z": 248,
+    "pitch": -0.6,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     799,
+     2496,
+     1329,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 120,
+   "measured_deg": 117.3,
+   "servo1": 712,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": -68,
+    "y": 132,
+    "z": 248,
+    "pitch": -0.6,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     712,
+     2496,
+     1329,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": 130,
+   "measured_deg": 117.3,
+   "servo1": 712,
+   "ok": false,
+   "clamped": "",
+   "pose": {
+    "x": -68,
+    "y": 132,
+    "z": 248,
+    "pitch": -0.6,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     712,
+     2496,
+     1329,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -10,
+   "measured_deg": -9.7,
+   "servo1": 2160,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 147,
+    "y": -25,
+    "z": 246,
+    "pitch": -1.1,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     2160,
+     2493,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -20,
+   "measured_deg": -19.7,
+   "servo1": 2272,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 140,
+    "y": -50,
+    "z": 246,
+    "pitch": -1.1,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     2272,
+     2493,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -30,
+   "measured_deg": -29.8,
+   "servo1": 2386,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 129,
+    "y": -74,
+    "z": 246,
+    "pitch": -1.1,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     2386,
+     2493,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -40,
+   "measured_deg": -39.6,
+   "servo1": 2498,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 115,
+    "y": -95,
+    "z": 246,
+    "pitch": -1.1,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     2498,
+     2493,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -50,
+   "measured_deg": -49.9,
+   "servo1": 2616,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 96,
+    "y": -114,
+    "z": 246,
+    "pitch": -1.0,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     2616,
+     2494,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -60,
+   "measured_deg": -59.8,
+   "servo1": 2729,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 75,
+    "y": -129,
+    "z": 246,
+    "pitch": -1.0,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     2729,
+     2494,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -70,
+   "measured_deg": -70.0,
+   "servo1": 2844,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 51,
+    "y": -140,
+    "z": 246,
+    "pitch": -1.0,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     2844,
+     2494,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -80,
+   "measured_deg": -80.0,
+   "servo1": 2956,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 26,
+    "y": -147,
+    "z": 246,
+    "pitch": -1.0,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     2956,
+     2494,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -90,
+   "measured_deg": -89.6,
+   "servo1": 3069,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 1,
+    "y": -149,
+    "z": 246,
+    "pitch": -1.0,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     3069,
+     2494,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -100,
+   "measured_deg": -99.7,
+   "servo1": 3182,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": -25,
+    "y": -147,
+    "z": 246,
+    "pitch": -1.0,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     3182,
+     2494,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -110,
+   "measured_deg": -109.7,
+   "servo1": 3295,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": -50,
+    "y": -140,
+    "z": 246,
+    "pitch": -1.0,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     3295,
+     2494,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -120,
+   "measured_deg": -117.3,
+   "servo1": 3382,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": -68,
+    "y": -132,
+    "z": 246,
+    "pitch": -1.0,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     3382,
+     2494,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "yaw",
+   "target_deg": -130,
+   "measured_deg": -117.3,
+   "servo1": 3382,
+   "ok": false,
+   "clamped": "",
+   "pose": {
+    "x": -68,
+    "y": -132,
+    "z": 246,
+    "pitch": -1.0,
+    "roll": 0,
+    "claw": -60,
+    "servos": [
+     3382,
+     2494,
+     1326,
+     1784,
+     2046,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": 10,
+   "measured_deg": 10,
+   "servo5": 2158,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": 10,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     2158,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": 20,
+   "measured_deg": 20,
+   "servo5": 2273,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": 20,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     2273,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": 30,
+   "measured_deg": 30,
+   "servo5": 2386,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": 30,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     2386,
+     1366
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": 40,
+   "measured_deg": 40,
+   "servo5": 2501,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": 40,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     2501,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": 50,
+   "measured_deg": 50,
+   "servo5": 2616,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": 50,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     2616,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": 60,
+   "measured_deg": 60,
+   "servo5": 2728,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": 60,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     2728,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": 70,
+   "measured_deg": 70,
+   "servo5": 2841,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": 70,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     2841,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": 80,
+   "measured_deg": 80,
+   "servo5": 2956,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": 80,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     2956,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": 90,
+   "measured_deg": 90,
+   "servo5": 3069,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": 90,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     3069,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": 100,
+   "measured_deg": 91,
+   "servo5": 3083,
+   "ok": false,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": 91,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     3083,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": -10,
+   "measured_deg": -10,
+   "servo5": 1935,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": -10,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     1935,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": -20,
+   "measured_deg": -20,
+   "servo5": 1822,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": -20,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     1822,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": -30,
+   "measured_deg": -30,
+   "servo5": 1710,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": -30,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     1710,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": -40,
+   "measured_deg": -40,
+   "servo5": 1594,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": -40,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     1594,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": -50,
+   "measured_deg": -50,
+   "servo5": 1483,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": -50,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     1483,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": -60,
+   "measured_deg": -60,
+   "servo5": 1367,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": -60,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     1367,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": -70,
+   "measured_deg": -70,
+   "servo5": 1255,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": -70,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     1255,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": -80,
+   "measured_deg": -80,
+   "servo5": 1141,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": -80,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     1141,
+     1366
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": -90,
+   "measured_deg": -90,
+   "servo5": 1025,
+   "ok": true,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": -90,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     1025,
+     1365
+    ]
+   }
+  },
+  {
+   "axis": "roll",
+   "target_deg": -100,
+   "measured_deg": -91,
+   "servo5": 1013,
+   "ok": false,
+   "clamped": "",
+   "pose": {
+    "x": 148,
+    "y": -1,
+    "z": 247,
+    "pitch": -0.7,
+    "roll": -91,
+    "claw": -60,
+    "servos": [
+     2051,
+     2499,
+     1325,
+     1784,
+     1013,
+     1365
+    ]
+   }
+  }
+ ],
+ "tol_deg": 5.0,
+ "scanned": "2026-11-10 09:51:59"
+}
