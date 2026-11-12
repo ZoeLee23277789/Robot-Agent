@@ -43,3 +43,4 @@ captures/
 # 從 robot_agent/core/ 移除的第三方原始檔備份與本機壓縮檔（本機保留，不上傳）
 robomaster_removed_core/
 *.zip
+videos/

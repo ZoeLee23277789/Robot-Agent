@@ -1,1 +1,2 @@
-./coppeliaSim.sh
+cd ~/CoppeliaSim_Edu_V4_10_0_rev0_Ubuntu24_04 && ./coppeliaSim.sh scenes/Capstone_Playground_nexarm.ttt
+./run_mirror.sh --task r01   
