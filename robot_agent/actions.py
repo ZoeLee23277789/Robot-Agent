@@ -34,11 +34,26 @@ class MoveChassisParams(BaseModel):
 class MoveArmParams(BaseModel):
     forward_mm: float = Field(0.0, description="relative mm; positive extends the arm forward. Max 100")
     up_mm: float = Field(0.0, description="relative mm; positive raises the arm. Max 100")
+    turn_left_deg: Optional[float] = Field(None, description="NexArm only: rotate the ARM'S BASE (not the chassis) by this many "
+                                                              "degrees, positive = left/counter-clockwise. The chassis does not move.")
+    roll_deg: Optional[float] = Field(None, description="NexArm only: rotate the WRIST around the gripper's own axis by this many "
+                                                         "degrees (twists the gripper, e.g. to grasp a sideways object).")
 
 
 class ArmToParams(BaseModel):
-    x_mm: float = Field(description="absolute forward reach of the arm, about 80 to 200")
-    y_mm: float = Field(description="absolute height of the arm, about 10 to 130")
+    x_mm: float = Field(description="absolute forward reach of the arm, about 80 to 200 (if the telemetry has arm_limits, use those ranges instead)")
+    y_mm: float = Field(description="absolute height of the arm, about 10 to 130 (if the telemetry has arm_limits, use those ranges instead)")
+    pitch_deg: Optional[float] = Field(None, description="only on arms that report arm_limits: gripper pitch, 0 = horizontal "
+                                                          "(reaches highest), -90 = pointing straight down (reaches lowest, "
+                                                          "needed to grasp things on the table). Omit to keep it horizontal.")
+    yaw_deg: Optional[float] = Field(None, description="NexArm only: absolute rotation of the arm's base, 0 = straight ahead, "
+                                                        "positive = left. Omit for straight ahead.")
+    roll_deg: Optional[float] = Field(None, description="NexArm only: absolute wrist roll, 0 = fingers level. Omit to keep the current roll.")
+
+
+class LiftArmParams(BaseModel):
+    height_mm: float = Field(description="absolute height of the arm lift column, 0 to 400 mm. 0 = arm down at chassis "
+                                         "level (the normal driving pose); 330 puts the gripper at the height of the table top")
 
 
 class RememberParams(BaseModel):
@@ -57,8 +72,20 @@ class EmptyParams(BaseModel):
     pass
 
 
+class RecenterArmParams(BaseModel):
+    pose: Optional[Literal["home", "stow"]] = Field(None, description="omit or 'home' = default ready pose (gripper horizontal in "
+                                                                       "front). 'stow' (NexArm only) = fold the arm over its own base "
+                                                                       "with the gripper pointing down: the most compact pose, use it "
+                                                                       "before driving through low or narrow places or when asked to "
+                                                                       "fold/retract the arm fully.")
+
+
 class LocateParams(BaseModel):
     object: str = Field(description="short description of what to find, e.g. 'red box'")
+
+
+class ScanParams(BaseModel):
+    category: str = Field(description="what kind of things to list, e.g. 'balls', 'small blocks', 'storage bins'")
 
 
 class AskHumanParams(BaseModel):
@@ -116,7 +143,13 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         ArmToParams,
         "Move the arm to an absolute pose. This also changes what the camera sees.",
         "_h_physical"),
-    "recenter_arm": ActionSpec(EmptyParams, "Return the arm to its default pose.", "_h_physical"),
+    "recenter_arm": ActionSpec(RecenterArmParams, "Return the arm to its default pose, or fold it (pose='stow').", "_h_physical"),
+    "lift_arm": ActionSpec(
+        LiftArmParams,
+        "Raise or lower the vertical lift column that carries the whole arm (gripper, arm camera and the front distance "
+        "sensor all move with it). For objects on raised surfaces the arm alone cannot reach; lower it back to 0 before "
+        "driving far. pick/place do this by themselves for objects on the table.",
+        "_h_physical"),
     "gripper": ActionSpec(GripperParams, "Open or close the gripper.", "_h_physical"),
     "wait": ActionSpec(WaitParams, "Do nothing, then observe again.", "_h_physical"),
     "stop": ActionSpec(EmptyParams, "Stop the chassis immediately.", "_h_physical"),
@@ -134,6 +167,13 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         "Look at the fixed overhead camera (not the front camera) to find the object from world coordinates. "
         "Ends the step.",
         "_h_locate_overhead"),
+    "scan_overhead": ActionSpec(
+        ScanParams,
+        "List EVERY object of one kind that the fixed overhead camera can see, each with its world position, distance "
+        "and bearing from you, height above the floor, and what it stands on or in (floor, the table, a bin, a mat). "
+        "Use it when the task describes its target indirectly (by place, by comparison, by exclusion, by a goal) so you "
+        "can work out which concrete object is meant BEFORE approach/pick. Ends the step.",
+        "_h_scan_overhead"),
     "align_to_tunnel": ActionSpec(
         LocateParams,
         "For elongated pass-through structures only (a tunnel, corridor, gate, archway, or similar you might "
@@ -171,6 +211,7 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         "Drive through the tunnel or underneath the platform along its long axis, entrance to exit, and report "
         "whether the robot really came out the other side. Ends the step.",
         "_h_drive_through"),
+    "return_to_origin": ActionSpec(EmptyParams, "Drive back to where this task started and face the start heading.", "_h_physical"),
     "remember": ActionSpec(RememberParams, "Store one short general fact for FUTURE tasks.", "_h_remember"),
     "ask_human": ActionSpec(AskHumanParams, "Ask the human operator a question.", "_h_ask_human"),
     "done": ActionSpec(DoneParams, "Finish the task. Must be the only action in its step.", "_h_done"),
@@ -180,17 +221,56 @@ ACTION_SPECS: dict[str, ActionSpec] = {
 def _build_action_union() -> type:
     """對應 通用 agent 框架的 Tools() 自動產生 schema：從 ACTION_SPECS 動態長出一個
     pydantic model，每個註冊過的動作各一個 Optional 欄位，不用手寫逐欄位的 union。"""
-    fields = {name: (Optional[spec.param_model], None) for name, spec in ACTION_SPECS.items()}
+    # name：這一格到底是哪個動作。Gemini 的結構化輸出（response_schema）沒辦法表達「欄位不存在」，實測它會把每一個
+    # Optional 的動作欄位全部填上值（2026-10-21 r12：一格裡 move_chassis、move_arm、…、pick、place 全部非空），
+    # 「取第一個非空欄位」就常常執行到 move_chassis 而不是它真正要的 approach/pick。所以逼模型用一個列舉欄位宣告動作，
+    # 解析只信這個欄位，其他填充的欄位一律忽略。
+    names = tuple(ACTION_SPECS.keys())
+    fields = {"name": (Literal[names], Field(description="the ONE action this object performs; fill only that action's "
+                                                         "parameter object and leave every other action null"))}
+    fields.update({name: (Optional[spec.param_model], None) for name, spec in ACTION_SPECS.items()})
     model = create_model("RobotAction", **fields)
 
-    def unpack(self) -> tuple:
-        """回傳 (動作名稱, 參數 dict)。如果 LLM 一次填了好幾個欄位，只取第一個。"""
-        for name in type(self).model_fields:
-            value = getattr(self, name)
-            if value is not None:
-                return name, value.model_dump()
-        return "wait", {"seconds": 0.5}
+    def filled(self) -> list:
+        """LLM 在這一格填了哪些動作的參數物件（正常只該有一個）。"""
+        return [name for name in type(self).model_fields if name != "name" and getattr(self, name) is not None]
 
+    def unpack(self) -> tuple:
+        """回傳 (動作名稱, 參數 dict)：以 name 宣告的動作為準，它的參數物件沒填就用預設值（沒參數的動作本來就是空的）。
+        name 無效或缺少時才退回下面的啟發式。
+        LLM 一次填了好幾個欄位時，以前「取第一個」——而 move_chassis 剛好是第一個欄位。gemini-robotics-er 的結構化輸出
+        常把 move_chassis 填成全 0 再填真正要的 pick/approach（2026-10-21 r05：記憶寫「用 pick」，送出的卻是 move_chassis(0,0,0)，
+        連續五次被拒絕），真正的動作就這樣被丟掉。所以先把「全 0 的 move_chassis/move_arm」這種沒意義的填充排除，再取第一個。"""
+        declared = getattr(self, "name", None)
+        if declared in ACTION_SPECS:
+            value = getattr(self, declared, None)
+            if value is None:
+                try:
+                    value = ACTION_SPECS[declared].param_model()   # 全部有預設值的參數模型（EmptyParams、WaitParams…）
+                except Exception:
+                    value = None
+            if value is not None:
+                return declared, value.model_dump()
+        names = self.filled()
+        if not names:
+            return "wait", {"seconds": 0.5}
+        if len(names) > 1:
+            zero_keys = {"move_chassis": ("forward_m", "right_m", "turn_left_deg"), "move_arm": ("forward_mm", "up_mm")}
+
+            def trivial(name):
+                keys = zero_keys.get(name)
+                if not keys:
+                    return False
+                d = getattr(self, name).model_dump()
+                return all(abs(float(d.get(k, 0) or 0)) < 1e-6 for k in keys)
+
+            real = [n for n in names if not trivial(n)]
+            if real:
+                names = real
+        name = names[0]
+        return name, getattr(self, name).model_dump()
+
+    model.filled = filled
     model.unpack = unpack
     return model
 

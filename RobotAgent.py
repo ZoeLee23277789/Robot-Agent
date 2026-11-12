@@ -64,8 +64,8 @@ async def amain() -> None:
         raise SystemExit(f"❌ {health.get('message')}\n   請先在機器人那一端執行：./start_all.sh（或 ./start_server.sh sim）")
     check_link(health)
     mode = health.get("mode", "?")
-    # 實體機器人預設每一步都要人按 Enter；模擬器和 mock 預設直接跑
-    confirm = args.confirm if args.confirm is not None else (mode == "real")
+    # 實體機器人（含桌上的 NexArm）預設每一步都要人按 Enter；模擬器和 mock 預設直接跑
+    confirm = args.confirm if args.confirm is not None else (mode in ("real", "armonly"))
     print(f"LLM: {args.provider}/{llm.model}｜Robot: {args.robot_url} (mode={mode})｜逐步確認: {'開' if confirm else '關'}")
 
     if args.task and not args.loop:

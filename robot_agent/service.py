@@ -48,11 +48,27 @@ from robot_agent.views import (
 # 模型第一版只擋精確 0 時，被發現有人填 0.0001、1.0 這種技術上非零但毫無效果的數字來繞過去。
 NOOP_THRESHOLDS = {
     "move_chassis": {"forward_m": 0.02, "right_m": 0.02, "turn_left_deg": 2.0},
-    "move_arm": {"forward_mm": 2.0, "up_mm": 2.0},
+    "move_arm": {"forward_mm": 2.0, "up_mm": 2.0, "turn_left_deg": 2.0, "roll_deg": 2.0},
 }
-PHYSICAL_ACTIONS = {"move_chassis", "move_arm", "arm_to", "recenter_arm", "gripper"}
+PHYSICAL_ACTIONS = {"move_chassis", "move_arm", "arm_to", "recenter_arm", "gripper", "lift_arm"}
 MAX_NOTES = 20
 RECOVERY_MARKER = "auto-recovered:"  # 跟 robot_server.py 的 _note_stall 約定好的標記字串
+
+
+def _shrink_jpg(jpg: bytes, max_side: int) -> bytes:
+    """俯視相機 2026-10-21 起是 1024 px（感知要放大看小物件），但每一步給 LLM 看的那張縮回 512，token 用量不變。"""
+    try:
+        import cv2
+        import numpy as np
+        arr = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if arr is None or max(arr.shape[:2]) <= max_side:
+            return jpg
+        f = max_side / float(max(arr.shape[:2]))
+        small = cv2.resize(arr, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        return buf.tobytes() if ok else jpg
+    except Exception:
+        return jpg
 
 
 def _classify_result(ok: bool, message: str) -> tuple[bool, bool]:
@@ -136,6 +152,7 @@ class RobotAgent:
         judge_llm=None,
     ):
         self.task = task
+        skills.set_task_context(task)   # 技能解析目標時可以回頭看整句任務（例如「from the table」）
         self.llm = llm
         self.robot = robot
         # 對應框架迴圈的 use_judge：互動模式(RobotAgent.py)預設開，robot_eval 的呼叫沒傳這個參數，
@@ -197,6 +214,7 @@ class RobotAgent:
             Path(frame_path).write_bytes(jpg)
         overhead_path = None
         if overhead_jpg:
+            overhead_jpg = _shrink_jpg(overhead_jpg, 512)   # 相機本身 1024 px 給感知用；每步丟給 LLM 的俯視圖維持 512，token 不變
             overhead_path = str(self.run_dir / f"step_{step:03d}_overhead.jpg")
             Path(overhead_path).write_bytes(overhead_jpg)
         return state, jpg, frame_path, overhead_jpg, overhead_path
@@ -268,6 +286,7 @@ class RobotAgent:
             text = resp.completion if isinstance(resp.completion, str) else str(resp.completion)
             self.latest_plan = " ".join(text.split())[:600]
             print(f"   🗺️  plan: {self.latest_plan}")
+            await self._post_event({"event": "plan", "step": step, "text": self.latest_plan})
         except Exception as e:
             print(f"   ⚠️ planner 呼叫失敗（{type(e).__name__}），沿用上一版計畫")
 
@@ -354,6 +373,12 @@ class RobotAgent:
         actions = output.action[: self.max_actions_per_step]
         for i, action in enumerate(actions):
             name, params = action.unpack()
+            try:
+                multi = action.filled()
+                if len(multi) > 1:   # 診斷用：Gemini 常把每個動作欄位都填滿（見 actions.unpack 的說明），只信 name 宣告的那個
+                    print(f"   ⚠ LLM filled {len(multi)} action objects in one slot (declared name={getattr(action, 'name', None)!r}); executing {name}")
+            except Exception:
+                pass
             handler = getattr(self, self.ACTION_HANDLERS[name])
             result: ActionResult = await handler(name, params, record, i)
             state_after = None
@@ -394,6 +419,22 @@ class RobotAgent:
             if result.stop_step:
                 return
 
+    async def _post_event(self, payload: dict) -> None:
+        """把任務／每一步的思考送給 robot_server 的 /live 儀表板（旁路，失敗不影響任務）。"""
+        post = getattr(self.robot, "post_event", None)
+        if post is None:
+            return
+        try:
+            await post(payload)
+        except Exception:
+            pass
+
+    async def _post_step(self, record: StepRecord) -> None:
+        await self._post_event({
+            "event": "step", "step": record.step, "thinking": record.thinking, "evaluation": record.evaluation_previous_goal,
+            "memory": record.memory, "next_goal": record.next_goal, "error": record.error, "llm_seconds": record.llm_seconds,
+            "actions": [{"name": a.name, "params": a.params, "ok": a.ok, "message": (a.message or "")[:400]} for a in record.actions]})
+
     async def _h_done(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
         if index > 0:  # done 必須單獨一步，前面的動作結果還沒被看過
             return ActionResult(
@@ -401,6 +442,7 @@ class RobotAgent:
         self.result.is_done = True
         self.result.success = bool(params.get("success"))
         self.result.final_text = str(params.get("text", ""))
+        await self._post_event({"event": "done", "success": self.result.success, "text": self.result.final_text})
         return ActionResult(ok=True, message="task finished")
 
     async def _h_locate(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
@@ -534,6 +576,40 @@ class RobotAgent:
         return ActionResult(ok=ok, message=msg, duration_s=round(time.time() - t0, 2),
                              counts_as_failure=False, resets_streak=True)
 
+    async def _h_scan_overhead(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
+        """列出俯視圖裡某一類的所有物件（位置、距離、高度、在哪個地標上/裡），讓 LLM 自己推理題目講的是哪一個。"""
+        cat = str(params.get("category", "")).strip() or "object"
+        t0 = time.time()
+        try:
+            jpg = await self.robot.overhead_frame()
+            if jpg is None:
+                ok, msg = False, "no overhead camera available on this robot"
+            else:
+                depth_png = await self.robot.overhead_depth()
+                state = record.state_before or {}
+                items, raw = await perception.survey_overhead(self.llm, jpg, cat, state.get("world_xy"), skills.pseudo_yaw(state),
+                                                              depth_png, state.get("static_landmarks") or {})
+                if not items:
+                    ok, msg = False, f"no {cat} visible in the overhead view ({raw[:120]})"
+                else:
+                    lines = []
+                    for i, it in enumerate(items, 1):
+                        h = (f"{it['height_m'] * 100:.0f} cm above the floor" if it["height_m"] is not None else "height unknown")
+                        lines.append(f"{i}. {it['label']}: world ({it['world_xy'][0]:.2f}, {it['world_xy'][1]:.2f}), "
+                                     f"{it['distance_m']:.2f} m from you (turn_left {it['turn_left_deg']:+.0f}°), {h}, {it['place']}")
+                    ok = True
+                    msg = (f"{len(items)} {cat} seen from above (sorted by distance from you):\n" + "\n".join(lines) +
+                           "\nThese are rough overhead estimates. Work out which one the task means (use the positions, heights "
+                           "and the static_landmarks distances in your telemetry), state your choice and the reason in memory, "
+                           "then refer to it concretely (colour + kind + place, e.g. 'lime ball on the table') in approach/pick/go_to. "
+                           "If none of them fits the task's description, say so with done(success=false) instead of picking a substitute.")
+        except Exception as e:
+            ok, msg = False, f"perception failed: {type(e).__name__}: {' '.join(str(e).split())[:200]}"
+        if ok:
+            self._remember_object(f"scan: {cat}", record.step, "scan_overhead", msg)
+        return ActionResult(ok=ok, message=msg, duration_s=round(time.time() - t0, 2),
+                             counts_as_failure=False, resets_streak=True)
+
     async def _h_go_to(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
         return await self._skill(name, skills.go_to(self.robot, self.llm, str(params.get("target", ""))))
 
@@ -575,8 +651,15 @@ class RobotAgent:
                                   "robot side first, or this robot simply does not have one)")
             else:
                 state = record.state_before or {}
-                found = await perception.locate_tunnel_axis(
-                    self.llm, jpg, obj, state.get("world_xy"), skills.pseudo_yaw(state))
+                found = None
+                lm_name = skills._match_landmark(obj, state.get("static_landmarks") or {})
+                if lm_name in ("tunnel", "platform"):
+                    # 已知結構：server 知道軸向與入口，不必靠指向模型在俯視圖上找兩端（gpt-4o 常指不出來）
+                    geo = await self.robot.act("landmark_axis", {"name": lm_name})
+                    found = skills.tunnel_axis_from_landmark(geo, state) if geo.get("ok") else None
+                if found is None:
+                    found = await perception.locate_tunnel_axis(
+                        self.llm, jpg, obj, state.get("world_xy"), skills.pseudo_yaw(state))
                 ok, msg = found.found, found.describe(obj)
         except Exception as e:
             ok, msg = False, f"perception failed: {type(e).__name__}: {' '.join(str(e).split())[:200]}"
@@ -660,6 +743,7 @@ class RobotAgent:
             if not health.get("ok"):
                 raise RuntimeError(f"robot server 沒有回應正常：{health}")
             print(f"🤖 已連上 robot server (mode={health.get('mode')})，任務：{self.task}")
+            await self._post_event({"event": "start", "task": self.task, "run_dir": str(self.run_dir)})
 
             for step in range(1, self.max_steps + 1):
                 state, jpg, frame_path, overhead_jpg, overhead_path = await self._observe(step)
@@ -678,6 +762,7 @@ class RobotAgent:
                     print(f"📍 Step {step}: ❌ {record.error}")
                     self.result.steps.append(record)
                     self._save()
+                    await self._post_step(record)
                     await self._update_long_term_summary()
                     if failures >= self.max_failures:
                         break
@@ -705,6 +790,7 @@ class RobotAgent:
 
                 self.result.steps.append(record)
                 self._save()
+                await self._post_step(record)
                 await self._update_long_term_summary()
 
                 if self.result.is_done:

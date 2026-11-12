@@ -97,6 +97,13 @@ class RobotClient:
             await self.stop()
             return {"ok": False, "message": f"transport error: {type(e).__name__}: {e}"}
 
+    async def post_event(self, payload: dict[str, Any]) -> None:
+        """把 agent 的任務／每一步思考丟給 robot_server 的 /live 儀表板看。純旁路：失敗一律吞掉、不影響任務。"""
+        try:
+            await asyncio.to_thread(self._json, "POST", "/agent_event", payload, 3.0)
+        except Exception:
+            pass
+
     async def reset(self) -> dict[str, Any]:
         try:
             return await asyncio.to_thread(self._json, "POST", "/reset", {}, 30.0)
