@@ -19,7 +19,8 @@ LOG="/tmp/robot_server.log"
 # pkill -f 比對的是整條命令列，裸字串會連 vim robot_server.py、tail -f /tmp/robot_server.log、
 # 甚至呼叫這支腳本的 shell（命令列裡剛好提到這個檔名）都一起砍掉。實測踩過。
 # (Test_Robot/)? 是為了也能砍掉搬家前從舊路徑啟動、還在跑的舊 server。
-SERVER_PATTERN="python -u (Test_Robot/)?robot_server\.py"
+# 2026-11-09：加上 --mode sim，才不會連實體 NexArm 的 server（start_arm.sh，--mode armonly、8767）一起砍掉，兩套要能同時跑。
+SERVER_PATTERN="python -u (Test_Robot/)?robot_server\.py --mode sim"
 
 start_server() {
     echo "啟動 robot_server.py（log 在 $LOG）..."
@@ -31,7 +32,7 @@ start_server() {
     # Python 會把腳本所在目錄放進 sys.path，所以從 repo 根目錄執行也找得到那兩個模組。
     nohup ~/rmenv/bin/python -u Test_Robot/robot_server.py --mode sim --chassis-backend hybrid > "$LOG" 2>&1 &
     disown
-    for i in $(seq 1 40); do
+    for i in $(seq 1 150); do   # 2026-10-21：啟動時上千次 zmq 呼叫（感測器旗標、地標範圍）會把模擬迴圈佔住，實測要 60-100 s
         sleep 1
         if curl -s -m 2 "$SERVER_URL/state" > /dev/null 2>&1; then
             sleep 1.5  # 等第一筆真的姿態遙測進來，不要拿預設值去校正感測器方向
@@ -81,9 +82,19 @@ if [ "$SIM_RESTARTED" = "1" ] && [ "$1" != "--restart" ]; then
     # SDK 連線必須在模擬重播之後重新建立，所以只要是這支腳本自己按的播放，就等同 --restart。
     echo "模擬剛被重新播放，舊的 robot_server.py 對它的控制通道已經失效，強制重開..."
 fi
-if [ "$1" = "--restart" ] || [ "$SIM_RESTARTED" = "1" ]; then
+kill_server() {
+    # SIGTERM 之後 server 偶爾會卡在 SDK 的執行緒池關閉（cannot schedule new futures after shutdown）退不掉，
+    # 新舊兩個 server 連同一個模擬器會互相刪距離感測器、無限重建、8765 永遠開不起來，所以等 3 秒沒退就 -9。
     pkill -f "$SERVER_PATTERN" 2>/dev/null || true
-    sleep 1
+    for _ in 1 2 3 4 5 6; do
+        pgrep -f "$SERVER_PATTERN" > /dev/null 2>&1 || return 0
+        sleep 0.5
+    done
+    pkill -9 -f "$SERVER_PATTERN" 2>/dev/null || true
+    sleep 0.5
+}
+if [ "$1" = "--restart" ] || [ "$SIM_RESTARTED" = "1" ]; then
+    kill_server
 fi
 if curl -s -m 2 "$SERVER_URL/state" > /dev/null 2>&1; then
     # HTTP 有回應不代表機器人還連著：模擬只要停止/重播過一次，server 這個 process 會活著，
@@ -92,8 +103,7 @@ if curl -s -m 2 "$SERVER_URL/state" > /dev/null 2>&1; then
     # 連續好幾次都在沿用一個殭屍 server。改成再看 /health 的 robot_link，斷了就自動重開。
     if curl -s -m 2 "$SERVER_URL/health" | grep -Eq '"robot_link": *"lost"'; then
         echo "robot_server.py 還在，但它跟機器人的 SDK 連線已經斷了（模擬曾被停止/重播），自動重開..."
-        pkill -f "$SERVER_PATTERN" 2>/dev/null || true
-        sleep 1
+        kill_server
         start_server || exit 1
     else
         echo "已經有 robot_server.py 在跑，直接沿用（想重開就加 --restart）。"

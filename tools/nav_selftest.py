@@ -40,7 +40,7 @@ from coppeliasim_zmqremoteapi_client import RemoteAPIClient  # noqa: E402
 from robot_agent.client import RobotClient  # noqa: E402
 
 SERVER = "http://127.0.0.1:8765"
-TURN_SIGN = -1.0  # turn_left 為正時世界朝向減少（跟 robot_server 一致）
+TURN_SIGN = 1.0   # 2026-10-22 起 turn_left 為正＝左轉（世界航向增加），見 README
 
 
 def wrap(d):

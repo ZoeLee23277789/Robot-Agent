@@ -7,12 +7,13 @@
     python test_movement.py
 """
 
+import sys
 import time
 import cv2
 
-from rm_connection import connect
+from rm_connection import connect, start_camera
 
-MODE = "sim"  # 之後接實體機器人時改成 "real"
+MODE = sys.argv[1] if len(sys.argv) > 1 else "sim"  # python test_movement.py real → 實體機器人
 
 
 def main():
@@ -41,10 +42,16 @@ def main():
         ep.robotic_arm.move(x=-20, y=0).wait_for_completed()
 
         print("[5/5] 相機測試：擷取一張畫面存成 snapshot.jpg")
-        ep.camera.start_video_stream(display=False)
-        time.sleep(2)
-        img = ep.camera.read_cv2_image(timeout=5)
-        ep.camera.stop_video_stream()
+        img = None
+        if start_camera(ep):
+            time.sleep(2)
+            try:
+                img = ep.camera.read_cv2_image(timeout=5)
+            except Exception as e:
+                print("串流開了但 5 秒內沒有收到畫面：", repr(e))
+            ep.camera.stop_video_stream()
+        else:
+            print("相機串流開不起來（機器人沒有回應串流指令）")
 
         if img is not None:
             cv2.imwrite("snapshot.jpg", img)
@@ -52,7 +59,7 @@ def main():
         else:
             print("沒有拿到影像 (img is None)，相機這段之後要再檢查")
 
-        print("全部測試跑完，沒有跳出例外就代表四個部件都能控制")
+        print("全部測試跑完" + ("" if img is not None else "（相機除外）"))
 
     finally:
         # 不管中間有沒有出錯，離開前一定要讓底盤停下來再關閉連線

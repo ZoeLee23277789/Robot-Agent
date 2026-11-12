@@ -29,7 +29,20 @@ from build_playground_new import POS, ROBOT_HEADING, ROBOT_START, world_aabb  # 
 
 MOVABLE = ("foam_cube_red", "foam_cube_blue", "foam_cyl_yellow", "foam_beam_green",
            "small_red", "small_blue_1", "small_blue_2", "small_green", "small_yellow",
-           "ball_orange", "ball_purple", "ball_pink", "ball_cyan")
+           "ball_orange", "ball_purple", "ball_pink", "ball_cyan", "ball_lime",
+           "trash_bottle_1", "trash_bottle_2", "trash_can_1", "trash_can_2", "trash_cup_1", "trash_carton_1")
+
+
+def detach_held(sim, robot_root):
+    """夾爪夾著的物件在模擬裡會被掛到機器人樹下（夾爪腳本把它接到 attachPoint）。先把它放回世界座標系再搬，
+    不然搬機器人時球跟著走、搬球時又被力感測器拉回夾爪，最後夾爪一張開球就掉在起點前面（2026-10-20 實測）。"""
+    out = []
+    for h in sim.getObjectsInTree(robot_root, sim.object_shape_type, 0):
+        alias = sim.getObjectAlias(h)
+        if alias.startswith(("small_", "ball_", "foam_")):
+            sim.setObjectParent(h, -1, True)
+            out.append(alias)
+    return out
 
 
 def reset_objects(sim, scale=1.0):
@@ -44,8 +57,8 @@ def reset_objects(sim, scale=1.0):
             continue
         x, y = POS[name][0] * scale, POS[name][1] * scale
         p = sim.getObjectPosition(h, sim.handle_world)
-        zmin = sim.getObjectFloatParam(h, sim.objfloatparam_objbbox_min_z)
-        zmax = sim.getObjectFloatParam(h, sim.objfloatparam_objbbox_max_z)
+        # 高度用形狀本身的 z 尺寸（跟目前姿態無關）：倒下的瓶子用世界 bbox 算只有 6 cm，擺正後會插進地板被彈飛
+        zmin, zmax = -sim.getShapeBB(h)[0][2] / 2, sim.getShapeBB(h)[0][2] / 2
         z = (zmax - zmin) / 2 + 0.002
         # 球放在自己的柱子（tee_<顏色>）上：位置跟高度都以柱子為準，不是放回地上
         color = name.split("_", 1)[1]
@@ -124,6 +137,9 @@ def main():
     if args.no_robot:
         scale = args.scale or 1.0
     else:
+        held = detach_held(sim, find_robot(sim, args.robot))
+        if held:
+            print("先把夾爪裡的物件脫離機器人：%s" % ", ".join(held))
         scale = reset_robot(sim, args.robot, args.scale or None)
         print(f"機器人已經移回起點 {ROBOT_START}、面向 {math.degrees(ROBOT_HEADING):.0f} 度，場景比例 = {scale:.3f}")
     if args.objects:

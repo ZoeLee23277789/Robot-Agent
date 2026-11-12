@@ -550,7 +550,7 @@ class NavMap(object):
             float(proj.max() - proj.min()) / 2.0, float(perp.max() - perp.min()) / 2.0
 
     # ------------------------------------------------------------------ 除錯圖
-    def render_png(self, robot_pose=None, path=None, goal=None, scale=4):
+    def render_png(self, robot_pose=None, path=None, goal=None, scale=4, target=None):
         if cv2 is None:
             return None
         img = np.full((N, N, 3), 255, dtype=np.uint8)
@@ -571,6 +571,13 @@ class NavMap(object):
                 cv2.line(img, a, b, (60, 180, 60), 2)
         if goal is not None:
             cv2.circle(img, px(*goal), 6, (0, 0, 220), 2)
+        if target:   # 鎖定目標：地標畫地面範圍、零散物件畫 16 cm 方框（洋紅），文字在翻轉後再寫
+            bb = target.get("bbox")
+            if not bb:
+                tx, ty = target["xy"]
+                bb = [tx - 0.08, tx + 0.08, ty - 0.08, ty + 0.08]
+            a, b = px(bb[0], bb[2]), px(bb[1], bb[3])
+            cv2.rectangle(img, a, b, (255, 0, 255), 2)
         if robot_pose is not None:
             x, y, hd = robot_pose
             p = px(x, y)
@@ -578,5 +585,10 @@ class NavMap(object):
             cv2.circle(img, p, 5, (0, 0, 220), -1)
             cv2.arrowedLine(img, p, q, (0, 0, 220), 2, tipLength=0.4)
         img = cv2.flip(img, 0)  # +y 朝上
+        if target:
+            bb = target.get("bbox") or [target["xy"][0] - 0.08, target["xy"][0] + 0.08, target["xy"][1] - 0.08, target["xy"][1] + 0.08]
+            tx, ty = px(bb[0], bb[3])
+            cv2.putText(img, str(target.get("label", "target")), (tx, max(12, N * scale - 1 - ty - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 255), 1)
         ok, buf = cv2.imencode(".png", img)
         return buf.tobytes() if ok else None
