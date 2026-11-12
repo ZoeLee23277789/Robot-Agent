@@ -19,6 +19,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from robot_agent.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, SystemMessage, UserMessage
+from robot_eval import truth as truth_mod
 
 
 @dataclass
@@ -51,6 +52,8 @@ JUDGE_SYSTEM = (
     "and the final camera image. Decide from EVIDENCE only. The agent's own claims (its memory, its final report, "
     "'ok' action results) are not evidence; camera images and telemetry are. "
     "A milestone passes if it was true at any point of the run, unless it describes the end state. "
+    "If an <evaluation_note> is given, it overrides the literal reading of the task: some tasks are deliberately impossible or "
+    "misleading, and the note says what counts as the correct behaviour (for example refusing and reporting why). "
     "task_success is true only if the user's request is fully satisfied at the end of the run. "
     "Odometry noise: position_m drifts by a few millimetres and yaw_deg by up to about 3 degrees even when the chassis "
     "never moves; changes below 0.03 m or 3 degrees are sensor noise, never evidence of movement. To decide whether the "
@@ -103,6 +106,21 @@ def check_telemetry(milestone: dict, history: dict) -> Optional[MilestoneResult]
     cond = milestone.get("telemetry")
     if not cond:
         return None
+    if isinstance(cond, dict) and cond.get("any_of"):
+        # 任一子條件成立即可：例如「把手臂抬高」可以是手臂自己的 arm_mm.y，也可以是升降柱 lift_mm（2026-10-22 e05：
+        # agent 用 lift_arm 350 mm 把整支手臂連相機抬高，舊條件只看 arm_mm.y 判成沒抬）
+        results = []
+        for sub in cond["any_of"]:
+            r = check_telemetry({"id": milestone["id"], "description": milestone["description"], "telemetry": sub}, history)
+            if r is None:
+                continue
+            if r.passed:
+                return r
+            results.append(r)
+        if not results:
+            return None
+        return MilestoneResult(milestone["id"], milestone["description"], False, "telemetry",
+                               " / ".join(r.reasoning for r in results))
     field, when = cond["field"], cond.get("when", "any")
     final = history.get("final_state") or {}
     steps = history.get("steps", [])
@@ -233,6 +251,96 @@ def check_report(milestone: dict, history: dict) -> Optional[MilestoneResult]:
     return None
 
 
+def check_truth(milestone: dict, history: dict) -> Optional[MilestoneResult]:
+    """truth 型 milestone：用模擬器真值快照判（run_evaluation 在任務前後各抓一次，存在 history 的
+    initial_truth / final_truth）。沒有快照（real/mock 模式、舊紀錄）就回 None 交給 LLM。
+    條件：
+      object / objects（全部要符合）/ any_of（任一符合即可）：零散物件的別名（ball_lime、small_blue_1…）
+      inside: <bin_*>          最後在那個收納箱的範圍內（而且沒有高過桶壁太多）
+      on: <table|mat_*|bench>  最後在那個地標的面上
+      min_z / max_z            最後的高度
+      moved_min_m / moved_max_m  跟任務開始時比的平面位移（moved_max_m 用來驗證「沒去動別的東西」）
+      robot_near: <地標>, max_m  機器人最後離地標中心的距離"""
+    cond = milestone.get("truth")
+    if not cond:
+        return None
+    final, initial = history.get("final_truth"), history.get("initial_truth")
+    if not final:
+        return None
+    lms = final.get("landmarks") or {}
+    rxy = final.get("robot_xy")
+    if cond.get("robot_at"):   # 機器人最後離某個世界座標多近
+        if not rxy:
+            return None
+        tx, ty = cond["robot_at"]
+        d = ((rxy[0] - tx) ** 2 + (rxy[1] - ty) ** 2) ** 0.5
+        ok = d <= float(cond.get("max_m", 0.5))
+        return MilestoneResult(milestone["id"], milestone["description"], ok, "truth",
+                               f"robot ended {d:.2f} m from ({tx}, {ty}) (limit {cond.get('max_m', 0.5)})")
+    if cond.get("robot_near_object"):   # 機器人最後離某個零散物件多近
+        p = (final.get("objects") or {}).get(cond["robot_near_object"])
+        if not rxy or p is None:
+            return None
+        d = ((rxy[0] - p[0]) ** 2 + (rxy[1] - p[1]) ** 2) ** 0.5
+        ok = float(cond.get("min_m", 0.0)) <= d <= float(cond.get("max_m", 1.0))
+        return MilestoneResult(milestone["id"], milestone["description"], ok, "truth",
+                               f"robot ended {d:.2f} m from {cond['robot_near_object']} (limits [{cond.get('min_m', 0)}, {cond.get('max_m', 1.0)}])")
+    if cond.get("robot_near"):
+        lm = lms.get(cond["robot_near"])
+        rxy = final.get("robot_xy")
+        if not lm or not rxy:
+            return None
+        bb = lm["bbox"]
+        d = ((rxy[0] - (bb[0] + bb[1]) / 2) ** 2 + (rxy[1] - (bb[2] + bb[3]) / 2) ** 2) ** 0.5
+        ok = d <= float(cond.get("max_m", 1.0))
+        return MilestoneResult(milestone["id"], milestone["description"], ok, "truth",
+                               f"robot ended {d:.2f} m from the centre of {cond['robot_near']} (limit {cond.get('max_m', 1.0)})")
+    names = cond.get("any_of") or cond.get("objects") or ([cond["object"]] if cond.get("object") else [])
+    if not names:
+        return None
+
+    def one(name):
+        p = (final.get("objects") or {}).get(name)
+        if p is None:
+            return False, f"{name}: not in the truth snapshot"
+        ok, why = True, [f"{name} at ({p[0]:.2f}, {p[1]:.2f}, z={p[2]:.2f}) {truth_mod.where(p, lms)}"]
+        if "inside" in cond:
+            lm = lms.get(cond["inside"])
+            hit = bool(lm) and truth_mod.inside(p, lm) and p[2] < lm["zmax"] + 0.12
+            ok &= hit
+            why.append(("" if hit else "NOT ") + f"inside {cond['inside']}")
+        if "on" in cond:
+            lm = lms.get(cond["on"])
+            top = (lm or {}).get("top_m", 0.0)
+            hit = bool(lm) and truth_mod.inside(p, lm) and (top - 0.02) <= p[2] <= (top + 0.30)
+            ok &= hit
+            why.append(("" if hit else "NOT ") + f"on {cond['on']}")
+        if "min_z" in cond or "max_z" in cond:
+            hit = float(cond.get("min_z", -1e9)) <= p[2] <= float(cond.get("max_z", 1e9))
+            ok &= hit
+            why.append(("" if hit else "NOT ") + f"within z [{cond.get('min_z', '-')}, {cond.get('max_z', '-')}]")
+        if any(k in cond for k in ("x_min", "x_max", "y_min", "y_max")):   # 最後落在某個平面區域（例如「拿到入口旁」）
+            hit = (float(cond.get("x_min", -1e9)) <= p[0] <= float(cond.get("x_max", 1e9))
+                   and float(cond.get("y_min", -1e9)) <= p[1] <= float(cond.get("y_max", 1e9)))
+            ok &= hit
+            why.append(("" if hit else "NOT ") + f"within x [{cond.get('x_min', '-')}, {cond.get('x_max', '-')}] y [{cond.get('y_min', '-')}, {cond.get('y_max', '-')}]")
+        if "moved_min_m" in cond or "moved_max_m" in cond:
+            p0 = ((initial or {}).get("objects") or {}).get(name)
+            if p0 is None:
+                ok = False
+                why.append("no initial position to compare")
+            else:
+                d = ((p[0] - p0[0]) ** 2 + (p[1] - p0[1]) ** 2) ** 0.5
+                hit = float(cond.get("moved_min_m", -1.0)) <= d <= float(cond.get("moved_max_m", 1e9))
+                ok &= hit
+                why.append(f"moved {d:.2f} m" + ("" if hit else f" (outside [{cond.get('moved_min_m', 0)}, {cond.get('moved_max_m', '∞')}])"))
+        return ok, ", ".join(why)
+
+    results = [one(n) for n in names]
+    passed = any(r[0] for r in results) if "any_of" in cond else all(r[0] for r in results)
+    return MilestoneResult(milestone["id"], milestone["description"], passed, "truth", "; ".join(r[1] for r in results))
+
+
 def _step_log(history: dict) -> str:
     lines = []
     for s in history.get("steps", []):
@@ -283,20 +391,24 @@ async def judge_run(task: dict, history: dict, judge_llm, max_frames: int = 12) 
     milestones = task.get("milestones", [])
     results: dict[str, MilestoneResult] = {}
     for m in milestones:
-        r = check_telemetry(m, history) or check_report(m, history)
+        r = check_telemetry(m, history) or check_report(m, history) or check_truth(m, history)
         if r is not None:
             results[m["id"]] = r
     pending = [m for m in milestones if m["id"] not in results]
+    truth_text = truth_mod.describe(history.get("final_truth"), history.get("initial_truth"))
 
-    settled = "\n".join(f"- [{r.milestone_id}] {r.description}: {'PASSED' if r.passed else 'FAILED'} by telemetry ({r.reasoning})"
+    settled = "\n".join(f"- [{r.milestone_id}] {r.description}: {'PASSED' if r.passed else 'FAILED'} by {r.method} ({r.reasoning})"
                         for r in results.values()) or "(none)"
     todo = "\n".join(f"- [{m['id']}] {m['description']}" for m in pending) or "(none, return an empty milestones list)"
     text = (
         f"<task>\n{task['description']}\n</task>\n\n"
-        f"<milestones_already_settled_by_telemetry>\n{settled}\n</milestones_already_settled_by_telemetry>\n\n"
+        + (f"<evaluation_note>\n{task['judge_note']}\n</evaluation_note>\n\n" if task.get("judge_note") else "")
+        + f"<milestones_already_settled_by_telemetry>\n{settled}\n</milestones_already_settled_by_telemetry>\n\n"
         f"<milestones_to_judge>\n{todo}\n</milestones_to_judge>\n\n"
         f"<run_log>\n{_step_log(history)}\n</run_log>\n\n"
-        "Camera images follow, each preceded by its label."
+        + (f"<simulator_ground_truth>\nAuthoritative end-of-run positions read directly from the simulator (not from the agent):\n"
+           f"{truth_text}\n</simulator_ground_truth>\n\n" if truth_text else "")
+        + "Camera images follow, each preceded by its label."
     )
     def build_parts(frames):
         parts: list = [ContentPartTextParam(text=text)]

@@ -32,6 +32,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SERVER_URL = "http://127.0.0.1:8765"
+MIRROR_REAL = ""   # --mirror-real：實體 server 的 URL；模擬每題重置後，實體也要歸位（手臂 home、夾爪開、底盤用里程計走回起點）
 START_XY = (-1.1, -2.51)   # Env/build_playground_new.py 的 ROBOT_START
 START_HEADING_DEG = 0.0    # 起點面向 +x（build_playground_new.ROBOT_HEADING）
 POS_TOL_M = 0.15
@@ -67,16 +68,56 @@ def _with_timeout(fn, seconds: float):
         ex.shutdown(wait=False, cancel_futures=True)
 
 
+AUTO_RESTART_SIM = False   # --restart-sim：模擬器當掉/卡死時自己用 start_sim_headless.sh 重開，不等人
+
+
+def sim_process_alive() -> bool:
+    """只看 coppeliaSim 程序在不在，不碰 zmq（任務執行中模擬迴圈很忙，zmq 探測慢了會誤判成當掉）。"""
+    return subprocess.call(["pgrep", "-x", "coppeliaSim"], stdout=subprocess.DEVNULL) == 0
+
+
+def sim_responding() -> bool:
+    try:
+        _with_timeout(lambda: _sim().getSimulationState(), 15)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def restart_sim(batch_dir: Path) -> bool:
+    """關掉（必要時 kill -9）CoppeliaSim，再用 start_sim_headless.sh 無視窗重開並載入場景。
+    重開後模擬是停止狀態，下一次 prepare() 的 start_all.sh 會按播放並重開 robot_server.py。"""
+    log(batch_dir, "!! 重開 CoppeliaSim（無視窗模式）...")
+    with open(batch_dir / "start_all.log", "a", encoding="utf-8") as f:
+        f.write(f"\n===== {time.strftime('%H:%M:%S')} restart CoppeliaSim =====\n")
+        f.flush()
+        subprocess.call(["./start_sim_headless.sh", "--stop"], cwd=ROOT, stdout=f, stderr=subprocess.STDOUT)
+        for _ in range(15):
+            if not sim_process_alive():
+                break
+            time.sleep(1)
+        else:
+            subprocess.call(["pkill", "-9", "-x", "coppeliaSim"])   # 卡死的程序收不到 SIGTERM
+            time.sleep(2)
+        rc = subprocess.call(["./start_sim_headless.sh"], cwd=ROOT, stdout=f, stderr=subprocess.STDOUT)
+    log(batch_dir, f"CoppeliaSim 重開 {'成功' if rc == 0 else f'失敗 rc={rc}，看 start_all.log'}")
+    return rc == 0
+
+
 def wait_for_sim(batch_dir: Path, max_wait_s: float = 20 * 60) -> bool:
-    """CoppeliaSim 沒回應（當掉/重開中）時，每 30 秒探測一次、最多等 max_wait_s，讓人有時間重開它。"""
-    t0 = time.time()
+    """CoppeliaSim 沒回應（當掉/重開中）時，每 30 秒探測一次、最多等 max_wait_s，讓人有時間重開它。
+    --restart-sim 時不等人：每 3 分鐘自己重開一次。"""
+    t0 = last_restart = time.time()
+    if AUTO_RESTART_SIM and not sim_responding():
+        restart_sim(batch_dir)
     while time.time() - t0 < max_wait_s:
-        try:
-            _with_timeout(lambda: _sim().getSimulationState(), 15)
+        if sim_responding():
             return True
-        except Exception as e:  # noqa: BLE001
-            log(batch_dir, f"!! CoppeliaSim 沒有回應（{type(e).__name__}），已等 {time.time() - t0:.0f}s；請確認它還開著、場景有載入")
-            time.sleep(30)
+        log(batch_dir, f"!! CoppeliaSim 沒有回應，已等 {time.time() - t0:.0f}s；請確認它還開著、場景有載入")
+        if AUTO_RESTART_SIM and time.time() - last_restart > 180:
+            restart_sim(batch_dir)
+            last_restart = time.time()
+        time.sleep(30)
     return False
 
 
@@ -142,6 +183,55 @@ def emergency_stop() -> None:
             continue
 
 
+def real_json(path: str, body: dict | None = None, timeout: float = 120.0) -> dict:
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(MIRROR_REAL.rstrip("/") + path, data=data, method="POST" if body is not None else "GET",
+                                 headers={"Content-Type": "application/json"} if body is not None else {})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def reset_real(batch_dir: Path) -> bool:
+    """鏡射批次：模擬重置完，實體也要回到同一個起始狀態。手臂 home + 夾爪開（/reset），底盤用里程計走回連線起點
+    （return_to_origin）。里程計殘差寫進 log；實體 server 連不上就不跑這題（不然實體跟模擬會越差越遠）。"""
+    try:
+        # 實體 server 沒開或 EP 斷線時不要一路跳題（2026-11-10 第一批就這樣白跳了 11 題）：等它回來，最多 10 分鐘
+        waited = 0
+        while True:
+            try:
+                health = real_json("/health", timeout=5)
+            except Exception as e:  # noqa: BLE001
+                health = {"ok": False, "detail": f"{type(e).__name__}: {e}"}
+            if health.get("ok") and health.get("robot_link") == "ok":
+                break
+            if waited == 0:
+                log(batch_dir, f"!! 實體 server 沒準備好（{health.get('detail') or health}），等它回來（最多 10 分鐘；"
+                               f"重啟：./start_arm.sh --with-ep；Ctrl+C 可中止）")
+            if waited >= 600:
+                log(batch_dir, "!! 等了 10 分鐘實體 server 還是沒好，跳過這題")
+                return False
+            time.sleep(10)
+            waited += 10
+        if waited:
+            log(batch_dir, f"實體 server 回來了（等了 {waited}s）")
+        r1 = real_json("/reset", {})
+        r2 = real_json("/action", {"name": "return_to_origin", "params": {}})
+        log(batch_dir, f"real reset: arm={'ok' if r1.get('ok') else 'FAIL'} ({r1.get('message', '')[:100]}) | "
+                       f"chassis={'ok' if r2.get('ok') else 'FAIL'} ({r2.get('message', '')[:160]})")
+        if not r1.get("ok"):
+            return False
+        if not r2.get("ok"):
+            log(batch_dir, "!! 實體底盤沒回到起點（里程計殘差太大或被擋），請人工擺回起點後按 Enter 繼續...")
+            try:
+                input()
+            except EOFError:
+                pass
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(batch_dir, f"!! 實體重置失敗（{type(e).__name__}: {e}），跳過這題")
+        return False
+
+
 def prepare(batch_dir: Path, attempts: int = 4) -> bool:
     """停止模擬 → start_all.sh（重播模擬、重開 server）→ 確認連線正常且機器人真的在起點。"""
     for i in range(1, attempts + 1):
@@ -169,6 +259,8 @@ def prepare(batch_dir: Path, attempts: int = 4) -> bool:
             pose_ok, pose_txt = False, f"讀取失敗 {type(e).__name__}: {e}"
         log(batch_dir, f"reset #{i}: start_all rc={rc} | health={health} | 起點 pose={pose_txt}")
         if rc == 0 and health.get("ok") and health.get("robot_link") == "ok" and pose_ok:
+            if MIRROR_REAL and not reset_real(batch_dir):
+                return False
             return True
         time.sleep(2 + 10 * i)  # 場景重新載入中的話多等一會兒
     return False
@@ -195,13 +287,27 @@ def run_task(batch_dir: Path, task: dict, args) -> tuple:
     for opt in ("provider", "model", "judge_provider", "judge_model", "judge_frames", "notes_mode", "notes_path"):
         if getattr(args, opt) is not None:
             cmd += [f"--{opt.replace('_', '-')}", str(getattr(args, opt))]
+    if args.home_after:
+        cmd.append("--home-after")
     t0 = time.time()
     with open(batch_dir / f"{task['id']}.log", "w", encoding="utf-8") as f:
-        try:
-            rc = subprocess.call(cmd, cwd=ROOT, stdout=f, stderr=subprocess.STDOUT, timeout=args.task_timeout)
-        except subprocess.TimeoutExpired:
-            rc = "timeout"
-            emergency_stop()
+        proc = subprocess.Popen(cmd, cwd=ROOT, stdout=f, stderr=subprocess.STDOUT)
+        while True:
+            try:
+                rc = proc.wait(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if time.time() - t0 > args.task_timeout:
+                proc.kill(); proc.wait()
+                rc = "timeout"
+                emergency_stop()
+                break
+            if AUTO_RESTART_SIM and not sim_process_alive():
+                # 模擬器在任務中途當掉：剩下的步數只會一直失敗，不用等到逾時
+                proc.kill(); proc.wait()
+                rc = "sim_crashed"
+                break
     dur = time.time() - t0
     summary = ""
     for line in (batch_dir / f"{task['id']}.log").read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -270,7 +376,27 @@ def main() -> None:
                         "（<batch_dir>/accumulated_notes.md），讓筆記真的跨題累積，不是每個子程序各自的空白檔案。")
     ap.add_argument("--notes-path", default=None, help="透傳給 run_evaluation 的 --notes-path")
     ap.add_argument("--report-only", metavar="BATCH_DIR", help="不跑任務，只重新彙整既有批次的 report.json")
+    ap.add_argument("--resume", metavar="BATCH_DIR", help="接續一個跑到一半的批次：已經有 evaluation.json 的任務跳過，結果寫進同一個資料夾")
+    ap.add_argument("--mirror-real", default=os.environ.get("ROBOT_MIRROR_REAL", ""), metavar="URL",
+                    help="鏡射批次：模擬 server 執行的動作同步送到這個實體 server（例如 http://127.0.0.1:8767，先 ./start_arm.sh --with-ep），"
+                         "每題之間實體也歸位（手臂 home、底盤用里程計走回起點）")
+    ap.add_argument("--home-after", action="store_true",
+                    help="每題做完後讓機器人走回出發點（模擬用地圖導航，鏡射時實體跟著走）；--mirror-real 時預設開，--no-home-after 關")
+    ap.add_argument("--no-home-after", action="store_true")
+    ap.add_argument("--restart-sim", action="store_true",
+                    help="CoppeliaSim 當掉/卡死時自動用 start_sim_headless.sh 重開，中途當掉的那題重跑一次（只適用無視窗模式）")
     args = ap.parse_args()
+    global AUTO_RESTART_SIM, MIRROR_REAL
+    AUTO_RESTART_SIM = args.restart_sim
+    MIRROR_REAL = (args.mirror_real or "").strip()
+    if MIRROR_REAL:
+        os.environ["ROBOT_MIRROR_REAL"] = MIRROR_REAL   # start_all.sh 重開的模擬 server 會讀這個，掛上鏡射
+        if not args.no_home_after:
+            args.home_after = True
+        # 實體 NexArm 沒有升降柱：鏡射批次預設把模擬的升降柱也關掉，兩邊能力一致（要保留就 ROBOT_NO_LIFT=0）
+        os.environ.setdefault("ROBOT_NO_LIFT", "1")
+        print("鏡射批次：模擬的升降柱停用（ROBOT_NO_LIFT=%s），跟實體一致" % os.environ["ROBOT_NO_LIFT"])
+        print(f"鏡射批次：模擬的動作會同步送到實體 {MIRROR_REAL}，每題之間實體歸位（手臂 home、底盤里程計回起點）")
 
     tasks = json.loads((ROOT / args.dataset).read_text(encoding="utf-8"))["tasks"]
     if args.task:
@@ -284,8 +410,21 @@ def main() -> None:
         aggregate(Path(args.report_only), tasks)
         return
 
-    batch_dir = Path(args.output_dir or f"robot_eval/results/all_{time.strftime('%Y%m%d_%H%M%S')}")
-    batch_dir = batch_dir if batch_dir.is_absolute() else ROOT / batch_dir
+    all_tasks = list(tasks)
+    if args.resume:
+        # 100 題一跑五到八小時，模擬器當掉或額度用完都會中斷：已經有 evaluation.json 的題目跳過，其餘寫進同一個資料夾，
+        # 最後的 report.json 彙整全部（含之前跑完的）
+        batch_dir = Path(args.resume)
+        batch_dir = batch_dir if batch_dir.is_absolute() else ROOT / batch_dir
+        done = {p.parent.name for p in batch_dir.glob("*/*/evaluation.json")}
+        tasks = [t for t in tasks if t["id"] not in done]
+        print(f"續跑 {batch_dir.name}：已完成 {len(done)} 題，剩 {len(tasks)} 題")
+        if not tasks:
+            aggregate(batch_dir, all_tasks)
+            return
+    else:
+        batch_dir = Path(args.output_dir or f"robot_eval/results/all_{time.strftime('%Y%m%d_%H%M%S')}")
+        batch_dir = batch_dir if batch_dir.is_absolute() else ROOT / batch_dir
     batch_dir.mkdir(parents=True, exist_ok=True)
     # accumulate 模式每個任務各自是獨立子程序，run_evaluation.py 自己算的路徑（session 底下）每次
     # 呼叫都不一樣，筆記不會真的跨題累積；在這裡把路徑固定成整個批次共用同一份，批次之間因為
@@ -293,6 +432,9 @@ def main() -> None:
     if args.notes_mode == "accumulate" and not args.notes_path:
         args.notes_path = str(batch_dir / "accumulated_notes.md")
     (batch_dir / "driver.pid").write_text(str(os.getpid()))
+    # /live 的批次成績表用：還沒跑到的題目也列出來
+    (batch_dir / "batch_tasks.json").write_text(json.dumps(
+        [{"id": t["id"], "difficulty": t.get("difficulty")} for t in all_tasks], ensure_ascii=False), encoding="utf-8")
     log(batch_dir, f"批次 {batch_dir.name}：{len(tasks)} 個任務 → {[t['id'] for t in tasks]}")
     log(batch_dir, f"輸出目錄：{batch_dir}")
 
@@ -304,7 +446,17 @@ def main() -> None:
                 log(batch_dir, f"!! {task['id']}：機器人沒有回到起點或 server 沒連上，跳過")
                 skipped.append(task["id"])
                 continue
-            run_task(batch_dir, task, args)
+            rc, _ = run_task(batch_dir, task, args)
+            if AUTO_RESTART_SIM and (rc == "sim_crashed" or not sim_responding()):
+                # 模擬器在這題執行中當掉/卡死：結果不算數，重開後重跑一次（aggregate 取最新的 session，舊的會被蓋過）
+                log(batch_dir, f"!! {task['id']} 執行中 CoppeliaSim 當掉，重開後重跑這題一次")
+                (batch_dir / f"{task['id']}.log").replace(batch_dir / f"{task['id']}.crashed.log")
+                restart_sim(batch_dir)
+                if prepare(batch_dir):
+                    run_task(batch_dir, task, args)
+                else:
+                    log(batch_dir, f"!! {task['id']}：重開後還是準備失敗，跳過")
+                    skipped.append(task["id"])
             outage = llm_outage(batch_dir / f"{task['id']}.log")
             if outage:
                 # 難題批次實測：Gemini 預付額度用完後每題 2 秒內連續三次 402，8 題全部「失敗」還有一題被誤判成功。
@@ -318,7 +470,7 @@ def main() -> None:
         emergency_stop()
         if skipped:
             log(batch_dir, f"準備失敗而跳過的任務：{skipped}")
-        aggregate(batch_dir, tasks)
+        aggregate(batch_dir, all_tasks)
         log(batch_dir, "批次結束")
 
 

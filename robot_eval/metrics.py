@@ -36,7 +36,7 @@ def create_task_metrics(task: dict, history: dict, milestones: list[MilestoneRes
     # 例外：所有 milestone 都是「遙測」直接證實通過（例如夾爪狀態、yaw 變化這種量得到的事實），
     # judge 就不能只憑影像或里程計雜訊否決——實測 gpt-4o judge 曾因 3 mm 的里程計漂移把一個
     # 動作完全正確的 e08 判成「底盤動了」。這種情況記成成功並標記 judge_overruled，方便事後複核。
-    telemetry_all_passed = total > 0 and all(m.passed and m.method in ("telemetry", "report") for m in milestones)
+    telemetry_all_passed = total > 0 and all(m.passed and m.method in ("telemetry", "report", "truth") for m in milestones)
     overruled = verdict is False and telemetry_all_passed
     success = True if overruled else (verdict if verdict is not None else (total > 0 and done == total))
 

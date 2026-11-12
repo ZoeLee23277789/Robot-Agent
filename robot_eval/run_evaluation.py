@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from robot_agent import RobotAgent, RobotClient
 from robot_agent.llm_factory import build_llm
 from robot_eval.judge import judge_run, milestone_dicts
+from robot_eval.truth import snapshot as truth_snapshot
 from robot_eval.metrics import build_report, create_task_metrics
 
 
@@ -64,6 +65,7 @@ async def amain() -> None:
                         "（存在 <output-dir>/<session>/accumulated_notes.md，每次執行重新從空白開始），"
                         "當作『允許跨任務學習』的對照組。off：完全不給筆記、remember() 也不寫入。")
     ap.add_argument("--notes-path", default=None, help="覆寫 --notes-mode 用的檔案路徑（fixed/accumulate 才有意義）")
+    ap.add_argument("--home-after", action="store_true", help="每題做完（真值抓完）後叫機器人 return_to_origin 走回出發點（鏡射批次預設開）")
     ap.add_argument("--no-pause", action="store_true", help="任務之間不停下來等人重置場景 (mock 模式會自動略過)")
     ap.add_argument("--rejudge", metavar="RUN_DIR", help="重新評一個既有的 run 資料夾，要搭配一個 --task")
     args = ap.parse_args()
@@ -81,6 +83,9 @@ async def amain() -> None:
             raise SystemExit("--rejudge 需要剛好一個 --task")
         run_dir = Path(args.rejudge)
         history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
+        if (run_dir / "truth.json").exists():   # 重評時把當時抓的真值一起帶上
+            tr = json.loads((run_dir / "truth.json").read_text(encoding="utf-8"))
+            history["initial_truth"], history["final_truth"] = tr.get("initial"), tr.get("final")
         await evaluate_history(tasks[0], history, judge_llm, run_dir, args.judge_frames)
         return
 
@@ -117,6 +122,9 @@ async def amain() -> None:
             agent = RobotAgent(task=task["description"], llm=llm, robot=robot, max_steps=args.max_steps,
                                run_dir=str(run_dir), confirm_each_step=False, ask_human=_auto_answer,
                                notes_path=notes_path, persist_notes=persist_notes)
+            # 模擬器真值：任務前後各抓一次零散物件的位置，truth 型里程碑（東西最後在不在桶子裡、有沒有被動過）
+            # 直接拿這個判，不靠畫面；sim 以外的模式拿不到就是 None，里程碑交回 LLM judge
+            initial_truth = await asyncio.to_thread(truth_snapshot) if mode == "sim" else None
             try:
                 result = await agent.run()
                 history = json.loads(result.model_dump_json())
@@ -124,6 +132,18 @@ async def amain() -> None:
                 print(f"   ✗ 執行失敗：{e}")
                 await robot.stop()
                 history = {"steps": [], "run_dir": str(run_dir), "final_text": f"execution failed: {e}"}
+            final_truth = await asyncio.to_thread(truth_snapshot) if mode == "sim" else None
+            history["initial_truth"], history["final_truth"] = initial_truth, final_truth
+            if args.home_after:
+                # 真值抓完才回家：回程不算任務的一部分，碰到東西也不影響評分
+                try:
+                    home = await robot.act("return_to_origin", {}, timeout=420)
+                    print("   回出發點:", home.get("message"))
+                    history["home_after"] = home
+                except Exception as e:
+                    print(f"   回出發點失敗：{e}")
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "truth.json").write_text(json.dumps({"initial": initial_truth, "final": final_truth}, indent=1), encoding="utf-8")
             all_metrics.append(await evaluate_history(task, history, judge_llm, run_dir, args.judge_frames))
 
     report = build_report(all_metrics)

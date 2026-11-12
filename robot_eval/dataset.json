@@ -179,12 +179,22 @@
       "milestones": [
         {
           "id": "m1",
-          "description": "The arm was raised to a noticeably different height",
+          "description": "The arm was raised to a noticeably different height (the arm itself or the lift column)",
           "telemetry": {
-            "field": "arm_mm.y",
-            "min": 40,
-            "when": "any",
-            "relative_to_start": true
+            "any_of": [
+              {
+                "field": "arm_mm.y",
+                "min": 40,
+                "when": "any",
+                "relative_to_start": true
+              },
+              {
+                "field": "lift_mm",
+                "min": 100,
+                "when": "any",
+                "relative_to_start": true
+              }
+            ]
           }
         },
         {
@@ -806,6 +816,2222 @@
           }
         }
       ]
+    },
+    {
+      "id": "r01",
+      "difficulty": "easy",
+      "category": "reasoning",
+      "description": "One of the balls is up on a piece of furniture instead of the floor. Drive to that piece of furniture and stop about 30 cm in front of it.",
+      "expected": "scan_overhead shows the lime ball 'on top of the table' -> go_to(table)",
+      "milestones": [
+        {
+          "description": "The robot ends close to the table (the raised block carrying the lime ball)",
+          "truth": {
+            "robot_near": "table",
+            "max_m": 0.9
+          },
+          "id": "m1"
+        },
+        {
+          "description": "The robot stops in front of it without hitting it",
+          "telemetry": {
+            "field": "tof_front_mm",
+            "min": 150,
+            "max": 450,
+            "when": "final"
+          },
+          "id": "m2"
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "r02",
+      "difficulty": "hard",
+      "category": "reasoning",
+      "description": "Take the ball that is sitting on the table and put it into the bin meant for balls.",
+      "expected": "ball_lime -> bin_balls",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The gripper closed on the ball",
+          "telemetry": {
+            "field": "gripper",
+            "in": [
+              "closed",
+              "normal"
+            ],
+            "when": "any"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The lime ball (the one on the table) ends up inside bin_balls",
+          "truth": {
+            "object": "ball_lime",
+            "inside": "bin_balls"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "No other ball was moved",
+          "truth": {
+            "objects": [
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "lift": 1
+      }
+    },
+    {
+      "id": "r03",
+      "difficulty": "hard",
+      "category": "reasoning",
+      "description": "There is exactly one ball you cannot reach without raising your arm. Pick it up and drop it into the blue bin.",
+      "expected": "ball_lime on the 0.33 m table; needs lift_arm",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The arm lift column was raised to reach it",
+          "telemetry": {
+            "field": "lift_mm",
+            "min": 250,
+            "when": "any"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The lime ball ends up inside bin_balls",
+          "truth": {
+            "object": "ball_lime",
+            "inside": "bin_balls"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "No other ball was moved",
+          "truth": {
+            "objects": [
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "chosen": 1,
+        "lift": 1
+      }
+    },
+    {
+      "id": "r04",
+      "difficulty": "easy",
+      "category": "reasoning",
+      "description": "Without touching anything, find out and report the colour of the ball that is on the table.",
+      "expected": "lime / yellow-green",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report names the colour of the ball on the table (lime / yellow-green / green)",
+          "report": {
+            "regex": "lime|green|chartreuse"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "Nothing was moved",
+          "truth": {
+            "objects": [
+              "ball_lime",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "r05",
+      "difficulty": "medium",
+      "category": "reasoning",
+      "description": "Which ball is closest to the blue storage bin? Report its colour without moving anything.",
+      "expected": "cyan (0.72 m from bin_balls); lime 1.4 m",
+      "milestones": [
+        {
+          "description": "The report says the cyan ball",
+          "report": {
+            "regex": "cyan|teal"
+          },
+          "id": "m1"
+        },
+        {
+          "description": "No ball was moved",
+          "truth": {
+            "objects": [
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime"
+            ],
+            "moved_max_m": 0.05
+          },
+          "id": "m2"
+        }
+      ],
+      "difficulty_basis": {
+        "chosen": 1
+      }
+    },
+    {
+      "id": "r06",
+      "difficulty": "medium",
+      "category": "reasoning",
+      "description": "Report the colour of the small block that lies nearest to the ball pit. Do not touch it.",
+      "expected": "small_blue_1 at (-2.4, 0.0), 0.3 m from the pit's north wall",
+      "milestones": [
+        {
+          "description": "The report says blue",
+          "report": {
+            "regex": "blue"
+          },
+          "id": "m1"
+        },
+        {
+          "description": "No block was moved",
+          "truth": {
+            "objects": [
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          },
+          "id": "m2"
+        }
+      ],
+      "difficulty_basis": {
+        "chosen": 1
+      }
+    },
+    {
+      "id": "r07",
+      "difficulty": "hard",
+      "category": "reasoning",
+      "description": "A ball was left up on the table where small children cannot reach it. Put it back where the balls belong.",
+      "expected": "ball_lime -> bin_balls (goal-based phrasing)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The lime ball ends up inside bin_balls",
+          "truth": {
+            "object": "ball_lime",
+            "inside": "bin_balls"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "It was not just dropped on the floor or on a mat"
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "chosen": 1,
+        "lift": 1
+      }
+    },
+    {
+      "id": "r08",
+      "difficulty": "easy",
+      "category": "reasoning",
+      "description": "Count the balls that stand on little posts on the floor (not the ones in the ball pit, not any ball on furniture) and report the number and their colours.",
+      "expected": "4: orange, purple, pink, cyan (lime on the table excluded)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report gives the number four",
+          "report": {
+            "regex": "\\b(4|four)\\b"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The report lists orange, purple, pink and cyan (teal/violet accepted) and does not count the lime ball on the table"
+        },
+        {
+          "id": "m3",
+          "description": "Nothing was moved",
+          "truth": {
+            "objects": [
+              "ball_lime",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "r09",
+      "difficulty": "easy",
+      "category": "reasoning",
+      "description": "How many small blocks have the same colour as the ball bin? Report the number.",
+      "expected": "ball bin is blue -> two blue blocks",
+      "milestones": [
+        {
+          "description": "The report says two",
+          "report": {
+            "regex": "\\b(2|two)\\b"
+          },
+          "id": "m1"
+        },
+        {
+          "description": "No block was moved",
+          "truth": {
+            "objects": [
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          },
+          "id": "m2"
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "r10",
+      "difficulty": "hard",
+      "category": "reasoning",
+      "description": "Clear the table: whatever is on it goes into the ball bin.",
+      "expected": "only ball_lime is on the table",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The lime ball ends up inside bin_balls",
+          "truth": {
+            "object": "ball_lime",
+            "inside": "bin_balls"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The table is empty at the end (nothing left on it)",
+          "truth": {
+            "object": "ball_lime",
+            "max_z": 0.3
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "chosen": 1,
+        "lift": 1
+      }
+    },
+    {
+      "id": "r11",
+      "difficulty": "hard",
+      "category": "reasoning",
+      "description": "Pick up the ball that is farthest from your starting position and drop it into the blue bin.",
+      "expected": "from (-1.1, -2.51): lime 3.49 m, cyan 2.83, orange 2.80, pink 2.45, purple 1.86 -> ball_lime",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The lime ball (farthest from the start) ends up inside bin_balls",
+          "truth": {
+            "object": "ball_lime",
+            "inside": "bin_balls"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "No other ball was moved",
+          "truth": {
+            "objects": [
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "chosen": 1,
+        "lift": 1
+      }
+    },
+    {
+      "id": "r12",
+      "difficulty": "hard",
+      "category": "reasoning",
+      "description": "Two of the small blocks are blue. Put the one that is closer to the red mat into the orange bin.",
+      "expected": "small_blue_2 at (0.9, -1.1) is 1.08 m from mat_red (0, -0.5); small_blue_1 is 2.45 m away",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "small_blue_2 (the blue block nearer the red mat) ends up inside bin_blocks",
+          "truth": {
+            "object": "small_blue_2",
+            "inside": "bin_blocks"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The other blue block was left alone",
+          "truth": {
+            "object": "small_blue_1",
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "chosen": 1
+      }
+    },
+    {
+      "id": "r13",
+      "difficulty": "hard",
+      "category": "reasoning",
+      "description": "Pick up the pink ball from the table and put it into the blue bin.",
+      "expected": "TRAP: the pink ball is on the floor, the ball on the table is lime. Correct behaviour = touch nothing, report that the premise is false.",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "Neither the pink ball nor the lime ball was moved (no substitute object was grasped)",
+          "truth": {
+            "objects": [
+              "ball_pink",
+              "ball_lime",
+              "ball_orange",
+              "ball_purple",
+              "ball_cyan"
+            ],
+            "moved_max_m": 0.05
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The final report says the pink ball is not on the table (it is on the floor / only the lime ball is on the table)",
+          "report": {
+            "regex": "on the floor|not (on|at|sitting on|up on) the table|isn'?t on the table|no pink ball|only the (lime|green)[a-z -]* ball is on|table (has|holds|carries|only has) (a|the|only)"
+          }
+        }
+      ],
+      "judge_note": "TRAP TASK: the pink ball is on the floor, not on the table (the only ball on the table is lime). The correct behaviour is to NOT grasp or move anything and to report that the premise is false. Count the task as a SUCCESS if the robot moved no object and the final report says the pink ball is not on the table / is on the floor. Count it as a FAILURE if it grasped any object or claimed to have done the task.",
+      "difficulty_basis": {
+        "trap": 1
+      }
+    },
+    {
+      "id": "t01",
+      "difficulty": "medium",
+      "category": "tidy",
+      "description": "There is an empty plastic bottle lying in the middle of the room, west of the purple ball. Pick it up and drop it into the white recycling bin.",
+      "expected": "trash_bottle_2 (-0.30,-1.15) -> bin_recycle",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The bottle from the middle of the room ends up inside bin_recycle",
+          "truth": {
+            "object": "trash_bottle_2",
+            "inside": "bin_recycle"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "Nothing else was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_cup_1",
+              "trash_carton_1",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1
+      }
+    },
+    {
+      "id": "t02",
+      "difficulty": "medium",
+      "category": "tidy",
+      "description": "Pick up the pink soda can near the south wall (next to the green mat) and put it into the white recycling bin.",
+      "expected": "trash_can_1 (0.60,-2.45) -> bin_recycle",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The can from the south side ends up inside bin_recycle",
+          "truth": {
+            "object": "trash_can_1",
+            "inside": "bin_recycle"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "Nothing else was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_2",
+              "trash_cup_1",
+              "trash_carton_1",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1
+      }
+    },
+    {
+      "id": "t03",
+      "difficulty": "medium",
+      "category": "tidy",
+      "description": "Someone dropped a paper cup near the entrance, just outside the ball pit's south wall. Throw it into the black trash bin.",
+      "expected": "trash_cup_1 (-1.70,-2.45) -> bin_trash",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The paper cup ends up inside bin_trash",
+          "truth": {
+            "object": "trash_cup_1",
+            "inside": "bin_trash"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "Nothing else was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_carton_1",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1
+      }
+    },
+    {
+      "id": "t04",
+      "difficulty": "medium",
+      "category": "tidy",
+      "description": "A cardboard carton is lying on the floor near the two trash bins in the south-east corner. Put it into the black bin.",
+      "expected": "trash_carton_1 (1.60,-2.55) -> bin_trash",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The carton ends up inside bin_trash",
+          "truth": {
+            "object": "trash_carton_1",
+            "inside": "bin_trash"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "Nothing else was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_cup_1",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1
+      }
+    },
+    {
+      "id": "t05",
+      "difficulty": "hard",
+      "category": "tidy",
+      "description": "Collect all the litter lying in the open (not under the platform) and sort it: bottles and cans go into the white recycling bin, cups and cartons into the black trash bin.",
+      "expected": "4 visible litter items sorted; the two under the platform are out of scope",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The bottle from the middle of the room is in bin_recycle",
+          "truth": {
+            "object": "trash_bottle_2",
+            "inside": "bin_recycle"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The can from the south side is in bin_recycle",
+          "truth": {
+            "object": "trash_can_1",
+            "inside": "bin_recycle"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "The cup is in bin_trash",
+          "truth": {
+            "object": "trash_cup_1",
+            "inside": "bin_trash"
+          }
+        },
+        {
+          "id": "m4",
+          "description": "The carton is in bin_trash",
+          "truth": {
+            "object": "trash_carton_1",
+            "inside": "bin_trash"
+          }
+        },
+        {
+          "id": "m5",
+          "description": "No toy was moved",
+          "truth": {
+            "objects": [
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 4,
+        "chosen": 1
+      }
+    },
+    {
+      "id": "t06",
+      "difficulty": "easy",
+      "category": "tidy",
+      "description": "Count how many pieces of litter (bottles, cans, cups, cartons) are lying in the open where the overhead camera can see them, and report the number and what each one is.",
+      "expected": "4: bottle (middle), can (south), cup (south-west), carton (south-east)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report says four",
+          "report": {
+            "regex": "\\b(4|four)\\b"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The report names a bottle, a can, a cup and a carton (the two items hidden under the platform are not counted)"
+        },
+        {
+          "id": "m3",
+          "description": "Nothing was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_cup_1",
+              "trash_carton_1",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "t07",
+      "difficulty": "hard",
+      "category": "tidy",
+      "description": "Is there any litter underneath the elevated platform? Drive under it and look with your own camera, then report exactly what you find there.",
+      "expected": "a bottle at (0.10,2.10) and a can at (1.20,2.20) under the deck; invisible to the overhead camera",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot actually went to / under the platform",
+          "telemetry": {
+            "field": "static_landmarks.platform.distance_m",
+            "max": 0.9,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The report mentions the bottle and/or the can that lie under the platform",
+          "report": {
+            "regex": "bottle|can\\b"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "No litter was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_cup_1",
+              "trash_carton_1"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "hidden": 1
+      }
+    },
+    {
+      "id": "t08",
+      "difficulty": "hard",
+      "category": "tidy",
+      "description": "A plastic bottle was left on the floor underneath the elevated platform. Go and get it, then drop it into the white recycling bin.",
+      "expected": "trash_bottle_1 (0.10,2.10) is hidden from the overhead camera: find it with the front camera, pick('bottle in front of me')",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The bottle from under the platform ends up inside bin_recycle",
+          "truth": {
+            "object": "trash_bottle_1",
+            "inside": "bin_recycle"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "Nothing else was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_2",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_cup_1",
+              "trash_carton_1",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "hidden": 1
+      }
+    },
+    {
+      "id": "t09",
+      "difficulty": "easy",
+      "category": "tidy",
+      "description": "Go to the white recycling bin, look into it, and report whether there is anything inside it.",
+      "expected": "the bin starts empty",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends near bin_recycle",
+          "telemetry": {
+            "field": "static_landmarks.bin_recycle.distance_m",
+            "max": 0.8,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The report says it is empty",
+          "report": {
+            "regex": "empty|nothing|no (bottles|cans|items|litter|objects)|is not anything"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "No litter was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_cup_1",
+              "trash_carton_1"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "t10",
+      "difficulty": "hard",
+      "category": "tidy",
+      "description": "Put the paper cup and the carton into the black bin, and the bottle from the middle of the room into the white bin.",
+      "expected": "three pick-and-place runs",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The cup is in bin_trash",
+          "truth": {
+            "object": "trash_cup_1",
+            "inside": "bin_trash"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The carton is in bin_trash",
+          "truth": {
+            "object": "trash_carton_1",
+            "inside": "bin_trash"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "The bottle is in bin_recycle",
+          "truth": {
+            "object": "trash_bottle_2",
+            "inside": "bin_recycle"
+          }
+        },
+        {
+          "id": "m4",
+          "description": "The can and the toys were left alone",
+          "truth": {
+            "objects": [
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow",
+              "trash_can_1"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 3
+      }
+    },
+    {
+      "id": "t11",
+      "difficulty": "easy",
+      "category": "tidy",
+      "description": "Which piece of litter is closer to the black trash bin: the cardboard carton or the pink can? Report your answer without touching either.",
+      "expected": "carton 0.65 m vs can 1.35 m",
+      "milestones": [
+        {
+          "description": "The report says the carton",
+          "report": {
+            "regex": "carton|box"
+          },
+          "id": "m1"
+        },
+        {
+          "description": "No litter was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_cup_1",
+              "trash_carton_1"
+            ],
+            "moved_max_m": 0.05
+          },
+          "id": "m2"
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "t12",
+      "difficulty": "medium",
+      "category": "tidy",
+      "description": "Drive to the piece of litter that is nearest to your starting position and stop about 30 cm in front of it, without touching it.",
+      "expected": "from (-1.1,-2.51): cup 0.60 m, bottle 1.58 m, can 1.70 m -> cup",
+      "milestones": [
+        {
+          "description": "The robot ends within 0.75 m of the paper cup",
+          "truth": {
+            "robot_near_object": "trash_cup_1",
+            "max_m": 0.75
+          },
+          "id": "m1"
+        },
+        {
+          "description": "The robot stops in front of it without hitting it",
+          "telemetry": {
+            "field": "tof_front_mm",
+            "min": 150,
+            "max": 450,
+            "when": "final"
+          },
+          "id": "m2"
+        },
+        {
+          "description": "The cup was not moved",
+          "truth": {
+            "objects": [
+              "trash_cup_1"
+            ],
+            "moved_max_m": 0.05
+          },
+          "id": "m3"
+        }
+      ],
+      "difficulty_basis": {
+        "chosen": 1
+      }
+    },
+    {
+      "id": "t13",
+      "difficulty": "hard",
+      "category": "tidy",
+      "description": "Sort the two pieces of litter near the south wall: the paper cup goes into the black bin and the pink can into the white bin.",
+      "expected": "cup -> trash, can -> recycle",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The cup is in bin_trash",
+          "truth": {
+            "object": "trash_cup_1",
+            "inside": "bin_trash"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The can is in bin_recycle",
+          "truth": {
+            "object": "trash_can_1",
+            "inside": "bin_recycle"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "Nothing else was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_2",
+              "trash_carton_1",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 2
+      }
+    },
+    {
+      "id": "t14",
+      "difficulty": "easy",
+      "category": "tidy",
+      "description": "Drive to the white recycling bin and stop about 30 cm in front of it.",
+      "expected": "bin_recycle at (2.45,-1.95)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends close to bin_recycle",
+          "telemetry": {
+            "field": "static_landmarks.bin_recycle.distance_m",
+            "max": 0.75,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The robot stops in front of it without hitting it",
+          "telemetry": {
+            "field": "tof_front_mm",
+            "min": 150,
+            "max": 450,
+            "when": "final"
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "t15",
+      "difficulty": "easy",
+      "category": "tidy",
+      "description": "Drive to the black trash bin and report the colour of the bin standing right next to it.",
+      "expected": "bin_recycle (white) stands 0.6 m east of bin_trash",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends near bin_trash",
+          "telemetry": {
+            "field": "static_landmarks.bin_trash.distance_m",
+            "max": 0.9,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The report says the neighbouring bin is white",
+          "report": {
+            "regex": "white"
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "t16",
+      "difficulty": "hard",
+      "category": "tidy",
+      "description": "Throw the yellow cup into the black bin.",
+      "expected": "TRAP: the only cup is light grey; the yellow things are a block, a pillar and a big foam cylinder",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "Nothing was grasped or moved (there is no yellow cup)",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_cup_1",
+              "trash_carton_1",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow",
+              "foam_cyl_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The final report says there is no yellow cup (the only cup is grey/white)",
+          "report": {
+            "regex": "no yellow cup|not (find|see|locate) (a|any) yellow cup|isn'?t (a|any) yellow cup|only (a )?(white|grey|gray|light[- ]grey) (paper )?cup|cup is (white|grey|gray)|(white|grey|gray), not yellow|does not exist|doesn'?t exist"
+          }
+        }
+      ],
+      "judge_note": "TRAP TASK: there is no yellow cup in the room (the paper cup is light grey). Correct behaviour: grasp nothing and report that no yellow cup exists (optionally noting the grey cup). Count as SUCCESS if nothing was moved and the report says so; FAILURE if it grasped any object or claimed to have thrown a yellow cup away.",
+      "difficulty_basis": {
+        "trap": 1
+      }
+    },
+    {
+      "id": "t17",
+      "difficulty": "hard",
+      "category": "tidy",
+      "description": "Clean up around the trash bins: any litter lying within about one metre of the bins goes into the black bin.",
+      "expected": "only trash_carton_1 is within 1 m of the bins",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The carton (the only litter within 1 m of the bins) ends up inside bin_trash",
+          "truth": {
+            "object": "trash_carton_1",
+            "inside": "bin_trash"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "Litter farther away and all toys were left alone",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_cup_1",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "chosen": 1
+      }
+    },
+    {
+      "id": "t18",
+      "difficulty": "medium",
+      "category": "tidy",
+      "description": "Pick up the bottle in the middle of the room and carry it to the entrance area by the south wall, then set it down on the floor there.",
+      "expected": "trash_bottle_2 from (-0.30,-1.15) to around (-1.1,-2.3)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The bottle ends up near the south wall (y below -2.0), west half of the room",
+          "truth": {
+            "object": "trash_bottle_2",
+            "y_max": -2.0,
+            "x_max": 0.0
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The bottle was carried at least 1 m",
+          "truth": {
+            "object": "trash_bottle_2",
+            "moved_min_m": 1.0
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1
+      }
+    },
+    {
+      "id": "t19",
+      "difficulty": "hard",
+      "category": "tidy",
+      "description": "Put the pink can from the south side into the white bin, then go and stand in front of the black bin.",
+      "expected": "can -> recycle, then park at bin_trash",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The can is in bin_recycle",
+          "truth": {
+            "object": "trash_can_1",
+            "inside": "bin_recycle"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The robot ends in front of bin_trash",
+          "telemetry": {
+            "field": "static_landmarks.bin_trash.distance_m",
+            "max": 0.8,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "The robot stops in front of it without hitting it",
+          "telemetry": {
+            "field": "tof_front_mm",
+            "min": 120,
+            "max": 600,
+            "when": "final"
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "seq": 1
+      }
+    },
+    {
+      "id": "t20",
+      "difficulty": "hard",
+      "category": "tidy",
+      "description": "Make the playroom tidy for the children: every toy that is out of place goes home (the ball on the table into the blue bin) and the litter in the middle of the room into the correct bin.",
+      "expected": "goal-based: lime ball -> bin_balls (needs lift), bottle_2 -> bin_recycle",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The lime ball from the table is in bin_balls",
+          "truth": {
+            "object": "ball_lime",
+            "inside": "bin_balls"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The bottle from the middle of the room is in bin_recycle",
+          "truth": {
+            "object": "trash_bottle_2",
+            "inside": "bin_recycle"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "Toys that were already in place were not moved",
+          "truth": {
+            "objects": [
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 2,
+        "chosen": 1,
+        "lift": 1
+      }
+    },
+    {
+      "id": "r14",
+      "difficulty": "medium",
+      "category": "reasoning",
+      "description": "Which small block is closest to the orange bin? Report its colour without touching anything.",
+      "expected": "small_green (-2.2,1.4) is 0.64 m from bin_blocks; the nearest blue block is 0.92 m",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report says green",
+          "report": {
+            "regex": "green"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "Nothing was moved",
+          "truth": {
+            "objects": [
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow",
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "chosen": 1
+      }
+    },
+    {
+      "id": "r15",
+      "difficulty": "hard",
+      "category": "reasoning",
+      "description": "Among the balls standing on posts on the floor, pick up the one that is closest to the ball pit and put it into the blue bin.",
+      "expected": "cyan 0.6 m, orange 0.9 m, purple 1.06 m, pink far",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The cyan ball (0.6 m from the pit's north wall) ends up inside bin_balls",
+          "truth": {
+            "object": "ball_cyan",
+            "inside": "bin_balls"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "No other ball was moved",
+          "truth": {
+            "objects": [
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_lime"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "chosen": 1
+      }
+    },
+    {
+      "id": "r16",
+      "difficulty": "easy",
+      "category": "reasoning",
+      "description": "There are two storage boxes for toys. Report which one is nearer to the table, without moving anything.",
+      "expected": "bin_balls 1.4 m vs bin_blocks 2.6 m from the table",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report names the blue ball bin",
+          "report": {
+            "regex": "blue|ball"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "Nothing was moved",
+          "truth": {
+            "objects": [
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime",
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "r17",
+      "difficulty": "medium",
+      "category": "reasoning",
+      "description": "Find the ball that is closest to the slide and report its colour.",
+      "expected": "orange (0.15,0) is 0.85 m from the slide bed; lime 1.0 m, purple 1.06 m",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report says orange",
+          "report": {
+            "regex": "orange"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "No ball was moved",
+          "truth": {
+            "objects": [
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "chosen": 1
+      }
+    },
+    {
+      "id": "r18",
+      "difficulty": "easy",
+      "category": "reasoning",
+      "description": "How many objects are standing on top of the table? Report the number and what they are.",
+      "expected": "1: the lime ball",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report says one",
+          "report": {
+            "regex": "\\b(1|one)\\b"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The report says it is a ball",
+          "report": {
+            "regex": "ball"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "The ball was not moved",
+          "truth": {
+            "objects": [
+              "ball_lime"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "r19",
+      "difficulty": "easy",
+      "category": "reasoning",
+      "description": "Report which corner pillar is closest to the two trash bins.",
+      "expected": "pillar_blue (2.65,-2.65) is about 1 m from the bins",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report says the blue pillar",
+          "report": {
+            "regex": "blue"
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "r20",
+      "difficulty": "easy",
+      "category": "reasoning",
+      "description": "Report the colour of the small block that lies nearest to your starting position.",
+      "expected": "yellow 1.14 m from the start, red 1.36 m",
+      "milestones": [
+        {
+          "description": "The report says yellow",
+          "report": {
+            "regex": "yellow"
+          },
+          "id": "m1"
+        },
+        {
+          "description": "No block was moved",
+          "truth": {
+            "objects": [
+              "small_red",
+              "small_blue_1",
+              "small_blue_2",
+              "small_green",
+              "small_yellow"
+            ],
+            "moved_max_m": 0.05
+          },
+          "id": "m2"
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "r21",
+      "difficulty": "medium",
+      "category": "reasoning",
+      "description": "Go to the bin meant for the kind of toy that is sitting on the table, and stop in front of it.",
+      "expected": "a ball is on the table -> bin_balls",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends in front of bin_balls (the ball bin)",
+          "telemetry": {
+            "field": "static_landmarks.bin_balls.distance_m",
+            "max": 0.8,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The robot stops in front of it without hitting it",
+          "telemetry": {
+            "field": "tof_front_mm",
+            "min": 120,
+            "max": 600,
+            "when": "final"
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "chosen": 1
+      }
+    },
+    {
+      "id": "r22",
+      "difficulty": "hard",
+      "category": "reasoning",
+      "description": "If there is a ball on the table, put it into the blue bin; otherwise just report that the table is empty.",
+      "expected": "conditional: the ball is there -> bin_balls (needs the lift)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The lime ball ends up inside bin_balls",
+          "truth": {
+            "object": "ball_lime",
+            "inside": "bin_balls"
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "lift": 1
+      }
+    },
+    {
+      "id": "r23",
+      "difficulty": "medium",
+      "category": "reasoning",
+      "description": "Which two balls on posts or furniture are nearest to each other? Report their colours without moving anything.",
+      "expected": "orange (0.15,0) and lime (0,0.8): 0.81 m apart; every other pair is >= 1.0 m",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report names the orange ball and the lime ball",
+          "report": {
+            "regex": "(?=.*orange)(?=.*(lime|green))"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "No ball was moved",
+          "truth": {
+            "objects": [
+              "ball_orange",
+              "ball_purple",
+              "ball_pink",
+              "ball_cyan",
+              "ball_lime"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "chosen": 1
+      }
+    },
+    {
+      "id": "p01",
+      "difficulty": "medium",
+      "category": "manipulation",
+      "description": "Put the cyan ball into the blue bin.",
+      "expected": "ball_cyan -> bin_balls",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The cyan ball is in bin_balls",
+          "truth": {
+            "object": "ball_cyan",
+            "inside": "bin_balls"
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1
+      }
+    },
+    {
+      "id": "p02",
+      "difficulty": "medium",
+      "category": "manipulation",
+      "description": "Put the small red block into the orange bin.",
+      "expected": "small_red -> bin_blocks",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The red block is in bin_blocks",
+          "truth": {
+            "object": "small_red",
+            "inside": "bin_blocks"
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1
+      }
+    },
+    {
+      "id": "p03",
+      "difficulty": "hard",
+      "category": "manipulation",
+      "description": "Put the yellow block into the orange bin, then put the pink ball into the blue bin.",
+      "expected": "two pick-and-place runs",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The yellow block is in bin_blocks",
+          "truth": {
+            "object": "small_yellow",
+            "inside": "bin_blocks"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The pink ball is in bin_balls",
+          "truth": {
+            "object": "ball_pink",
+            "inside": "bin_balls"
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 2
+      }
+    },
+    {
+      "id": "p04",
+      "difficulty": "hard",
+      "category": "manipulation",
+      "description": "Move the small blue block that lies next to the ball pit onto the blue mat.",
+      "expected": "small_blue_1 (-2.4,0) -> mat_blue (-0.7,0.8)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "small_blue_1 ends up on the blue mat",
+          "truth": {
+            "object": "small_blue_1",
+            "on": "mat_blue"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The other blue block was left alone",
+          "truth": {
+            "objects": [
+              "small_blue_2"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1,
+        "chosen": 1
+      }
+    },
+    {
+      "id": "p05",
+      "difficulty": "medium",
+      "category": "manipulation",
+      "description": "Place the small green block on the green mat.",
+      "expected": "small_green -> mat_green (0.7,-2.0)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "small_green ends up on the green mat",
+          "truth": {
+            "object": "small_green",
+            "on": "mat_green"
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1
+      }
+    },
+    {
+      "id": "p06",
+      "difficulty": "medium",
+      "category": "manipulation",
+      "description": "Take the purple ball and put it into the blue bin.",
+      "expected": "ball_purple -> bin_balls",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The purple ball is in bin_balls",
+          "truth": {
+            "object": "ball_purple",
+            "inside": "bin_balls"
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1
+      }
+    },
+    {
+      "id": "p07",
+      "difficulty": "hard",
+      "category": "manipulation",
+      "description": "Return the lime ball from the table to the blue bin, then put the small red block into the orange bin.",
+      "expected": "lift pick + floor pick",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The arm lift was used for the ball on the table",
+          "telemetry": {
+            "field": "lift_mm",
+            "min": 250,
+            "when": "any"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The lime ball is in bin_balls",
+          "truth": {
+            "object": "ball_lime",
+            "inside": "bin_balls"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "The red block is in bin_blocks",
+          "truth": {
+            "object": "small_red",
+            "inside": "bin_blocks"
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 2,
+        "lift": 1
+      }
+    },
+    {
+      "id": "p08",
+      "difficulty": "medium",
+      "category": "manipulation",
+      "description": "Pick up the orange ball, carry it to the red mat and release it there.",
+      "expected": "ball_orange (0.15,0) -> mat_red (0,-0.5)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The orange ball ends up on the red mat",
+          "truth": {
+            "object": "ball_orange",
+            "on": "mat_red"
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "manip": 1
+      }
+    },
+    {
+      "id": "n01",
+      "difficulty": "easy",
+      "category": "navigation",
+      "description": "Drive to the table and stop about 40 cm in front of it.",
+      "expected": "table at (0,0.8)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends close to the table",
+          "telemetry": {
+            "field": "static_landmarks.table.distance_m",
+            "max": 0.95,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The robot stops in front of it without hitting it",
+          "telemetry": {
+            "field": "tof_front_mm",
+            "min": 250,
+            "max": 600,
+            "when": "final"
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "n02",
+      "difficulty": "easy",
+      "category": "navigation",
+      "description": "Go to the white recycling bin.",
+      "expected": "bin_recycle (2.45,-1.95)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends in front of bin_recycle",
+          "telemetry": {
+            "field": "static_landmarks.bin_recycle.distance_m",
+            "max": 0.8,
+            "when": "final"
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "n03",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Visit the black trash bin first and then the blue ball bin, stopping in front of each.",
+      "expected": "order matters",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot got close to bin_trash at some point",
+          "telemetry": {
+            "field": "static_landmarks.bin_trash.distance_m",
+            "max": 0.9,
+            "when": "any"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The robot ends in front of bin_balls",
+          "telemetry": {
+            "field": "static_landmarks.bin_balls.distance_m",
+            "max": 0.9,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "bin_trash was visited BEFORE bin_balls"
+        }
+      ],
+      "difficulty_basis": {
+        "seq": 1
+      }
+    },
+    {
+      "id": "n04",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Drive to the spot roughly halfway between the bench and the tunnel and stop there.",
+      "expected": "bench (2.6,1.6), tunnel (2.2,-0.4) -> midpoint (2.4,0.6); the foam beam sits nearby",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends within 0.6 m of the midpoint (2.3, 0.6)",
+          "truth": {
+            "robot_at": [
+              2.3,
+              0.6
+            ],
+            "max_m": 0.6
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "chosen": 1
+      }
+    },
+    {
+      "id": "n05",
+      "difficulty": "easy",
+      "category": "navigation",
+      "description": "Go towards the ball on the table but stop about 50 cm before the table's edge.",
+      "expected": "stop_m 0.5",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends close to the table",
+          "telemetry": {
+            "field": "static_landmarks.table.distance_m",
+            "max": 1.05,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The robot stops in front of it without hitting it",
+          "telemetry": {
+            "field": "tof_front_mm",
+            "min": 380,
+            "max": 650,
+            "when": "final"
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "n06",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Stand at the bottom end of the slide (where someone sliding down would land) and face up the slide.",
+      "expected": "slide landing at (1.3,-0.75)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends near the slide",
+          "telemetry": {
+            "field": "static_landmarks.slide.distance_m",
+            "max": 1.6,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The robot stands at the slide's landing (south end, around (1.3, -0.9)) facing north up the slide",
+          "truth": {
+            "robot_at": [
+              1.3,
+              -0.95
+            ],
+            "max_m": 0.5
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "chosen": 1
+      }
+    },
+    {
+      "id": "n07",
+      "difficulty": "easy",
+      "category": "grounding",
+      "description": "Count the storage bins in the room and report the number and their colours.",
+      "expected": "bin_balls blue, bin_blocks orange, bin_trash black, bin_recycle white",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report says four",
+          "report": {
+            "regex": "\\b(4|four)\\b"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The colours blue, orange, black and white are reported"
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "n08",
+      "difficulty": "easy",
+      "category": "grounding",
+      "description": "What piece of litter is lying on the floor near the two trash bins? Report what it is.",
+      "expected": "trash_carton_1 at (1.6,-2.55)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report says a carton/box",
+          "report": {
+            "regex": "carton|box"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "No litter was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_cup_1",
+              "trash_carton_1"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "n09",
+      "difficulty": "hard",
+      "category": "grounding",
+      "description": "Drive underneath the platform and report how many pieces of litter are lying there.",
+      "expected": "a bottle and a can under the deck",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot went to / under the platform",
+          "telemetry": {
+            "field": "static_landmarks.platform.distance_m",
+            "max": 0.9,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The report says two",
+          "report": {
+            "regex": "\\b(2|two)\\b"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "No litter was moved",
+          "truth": {
+            "objects": [
+              "trash_bottle_1",
+              "trash_bottle_2",
+              "trash_can_1",
+              "trash_can_2",
+              "trash_cup_1",
+              "trash_carton_1"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "hidden": 1
+      }
+    },
+    {
+      "id": "n10",
+      "difficulty": "easy",
+      "category": "navigation",
+      "description": "Go to the corner pillar that is nearest to the trash bins and stop in front of it.",
+      "expected": "pillar_blue",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends in front of pillar_blue",
+          "telemetry": {
+            "field": "static_landmarks.pillar_blue.distance_m",
+            "max": 1.0,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The robot stops in front of it without hitting it",
+          "telemetry": {
+            "field": "tof_front_mm",
+            "min": 120,
+            "max": 600,
+            "when": "final"
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "n11",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Go to the black trash bin, but do not drive through the tunnel on the way.",
+      "expected": "the direct route passes next to the tunnel, not through it",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends in front of bin_trash",
+          "telemetry": {
+            "field": "static_landmarks.bin_trash.distance_m",
+            "max": 0.9,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The robot never drove through the tunnel (its path stayed outside the tunnel interior)"
+        }
+      ],
+      "difficulty_basis": {
+        "seq": 1
+      }
+    },
+    {
+      "id": "n12",
+      "difficulty": "easy",
+      "category": "grounding",
+      "description": "Is the ball on the table higher or lower than the top edge of the blue ball bin's walls? Report your answer.",
+      "expected": "ball at 0.47 m vs bin walls 0.10 m",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report says higher",
+          "report": {
+            "regex": "higher|above|taller"
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "n13",
+      "difficulty": "easy",
+      "category": "grounding",
+      "description": "Which is farther from where you are right now: the bench or the ball pit? Report your answer.",
+      "expected": "from the start: bench 5.5 m, ball pit 1.5 m",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The report says the bench",
+          "report": {
+            "regex": "bench"
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "n14",
+      "difficulty": "easy",
+      "category": "navigation",
+      "description": "Go to the storage bin that is closest to the slide and stop in front of it.",
+      "expected": "bin_trash 2.5 m, bin_recycle 2.7 m, bin_balls 2.7 m",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends in front of bin_trash (2.5 m from the slide, the nearest bin)",
+          "telemetry": {
+            "field": "static_landmarks.bin_trash.distance_m",
+            "max": 0.9,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The robot stops in front of it without hitting it",
+          "telemetry": {
+            "field": "tof_front_mm",
+            "min": 120,
+            "max": 600,
+            "when": "final"
+          }
+        }
+      ],
+      "difficulty_basis": {}
+    },
+    {
+      "id": "n15",
+      "difficulty": "medium",
+      "category": "navigation",
+      "description": "Find the paper cup and stop about 30 cm in front of it without touching it.",
+      "expected": "trash_cup_1 at (-1.7,-2.45)",
+      "milestones": [
+        {
+          "id": "m1",
+          "description": "The robot ends within 0.75 m of the cup",
+          "truth": {
+            "robot_near_object": "trash_cup_1",
+            "max_m": 0.75
+          }
+        },
+        {
+          "id": "m2",
+          "description": "The robot stops in front of it without hitting it",
+          "telemetry": {
+            "field": "tof_front_mm",
+            "min": 150,
+            "max": 450,
+            "when": "final"
+          }
+        },
+        {
+          "id": "m3",
+          "description": "The cup was not moved",
+          "truth": {
+            "objects": [
+              "trash_cup_1"
+            ],
+            "moved_max_m": 0.05
+          }
+        }
+      ],
+      "difficulty_basis": {
+        "chosen": 1
+      }
     }
   ]
 }
