@@ -107,6 +107,19 @@ class PickParams(BaseModel):
     object: str = Field(description="the object to grasp, e.g. 'purple ball', 'small green block' (or 'x, y')")
 
 
+class PickFromTopParams(BaseModel):
+    object: str = Field(description="the small object standing on top of a box/table/shelf, e.g. 'orange stick'")
+    surface_m: Optional[float] = Field(None, description="OMIT for things on the box (default box top). Pass 0 for something standing ON THE FLOOR. Otherwise only when the task states the surface height in metres.")
+    object_h_m: Optional[float] = Field(None, description="the object's own height (metres); OMIT unless the task states it: measured by the robot")
+    depth_m: Optional[float] = Field(None, description="how far behind the surface's front edge it stands (metres); OMIT unless the task states it: measured by the robot")
+
+
+class PlaceOnTopParams(BaseModel):
+    surface_m: Optional[float] = Field(None, description="OMIT to stand it on the box top. Pass 0 to stand it on the FLOOR in front of the robot. Otherwise only when the task states a height.")
+    object_h_m: Optional[float] = Field(None, description="OMIT unless the task states it")
+    depth_m: Optional[float] = Field(None, description="how far behind the front edge to put it (metres); OMIT to put it back where it was picked")
+
+
 class PlaceParams(BaseModel):
     target: str = Field(description="where to put the held object: a landmark (bin_blocks, bin_balls, mat_red, mat_green, "
                                     "mat_blue, ...), an object description, or world coordinates 'x, y'")
@@ -153,6 +166,12 @@ ACTION_SPECS: dict[str, ActionSpec] = {
     "gripper": ActionSpec(GripperParams, "Open or close the gripper.", "_h_physical"),
     "wait": ActionSpec(WaitParams, "Do nothing, then observe again.", "_h_physical"),
     "stop": ActionSpec(EmptyParams, "Stop the chassis immediately.", "_h_physical"),
+    "survey_scene": ActionSpec(
+        EmptyParams,
+        "REAL FIELD perception: tilts the camera down, lists every small object around the box and whether each stands ON THE BOX "
+        "or ON THE FLOOR, then puts the arm back. Does not drive. Use it before touching anything whenever the task refers to an "
+        "object by description, place, comparison or purpose. Ends the step.",
+        "_h_survey_scene"),
     "locate": ActionSpec(
         LocateParams,
         "Precise perception: where the object is in the current front-camera image. Does not move the robot. "
@@ -201,6 +220,19 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         "fingers using the front distance sensor, closes, lifts, and VERIFIES the object came along. Reports GRASPED "
         "or exactly why not. Ends the step.",
         "_h_pick"),
+    "pick_from_top": ActionSpec(
+        PickFromTopParams,
+        "Grasp a small object standing on TOP of a box/table in ONE call, using the gripper camera instead of the front "
+        "distance sensor (which only sees the box face): the arm stays low, the gripper camera aims at the object, the gripper "
+        "reaches forward horizontally over the surface, closes and verifies. Stand right in front of the surface first "
+        "(approach('<box>', stop_m=0.2)). Ends the step.",
+        "_h_pick_from_top"),
+    "place_on_top": ActionSpec(
+        PlaceOnTopParams,
+        "Stand the held object upright ON TOP of a box/table right in front of you in ONE call (the reverse of pick_from_top): "
+        "creeps up to the box, lowers the object onto the top from above just behind the front edge, opens, lifts off and checks "
+        "with the camera. Stand right in front of the surface first (approach('<box>', stop_m=0.2)). Ends the step.",
+        "_h_place_on_top"),
     "place": ActionSpec(
         PlaceParams,
         "Put down the held object at a target in ONE call: drives there, raises the arm over a bin's rim or lowers it "
@@ -211,7 +243,7 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         "Drive through the tunnel or underneath the platform along its long axis, entrance to exit, and report "
         "whether the robot really came out the other side. Ends the step.",
         "_h_drive_through"),
-    "return_to_origin": ActionSpec(EmptyParams, "Drive back to where this task started and face the start heading.", "_h_physical"),
+    "return_to_origin": ActionSpec(EmptyParams, "Drive back to where this task started and face the start heading (on the real field it then lines up on the white floor marker with the camera).", "_h_return_home"),
     "remember": ActionSpec(RememberParams, "Store one short general fact for FUTURE tasks.", "_h_remember"),
     "ask_human": ActionSpec(AskHumanParams, "Ask the human operator a question.", "_h_ask_human"),
     "done": ActionSpec(DoneParams, "Finish the task. Must be the only action in its step.", "_h_done"),

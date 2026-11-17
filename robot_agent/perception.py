@@ -677,9 +677,110 @@ async def locate_overhead(llm, jpg: Optional[bytes], obj: str,
                            height_m=height_m, raw=raw)
 
 
+# /live 前鏡頭上的「判定目標」框（2026-11-16 使用者：「他可以把判斷是目標的東西框起來嗎？」）：
+# locate 每指到一個東西就呼叫 LOCK_HOOK(box, label)；box = [x0, y0, x1, y1]（0–1000，同一張畫面）。service 啟動時掛上，
+# 沒掛就什麼都不做。夾爪自己不框（那是對位用的參考點，不是目標）。
+LOCK_HOOK = None
+
+
+def box_around(jpg: Optional[bytes], x: float, y: float):
+    """模型只給「點」：從那一點往外找顏色相近、連在一起的區域當成物件的框。找不到合理的區域就回固定大小的框。全部 0–1000。"""
+    fallback = [max(0, x - 45), max(0, y - 80), min(1000, x + 45), min(1000, y + 80)]
+    try:
+        img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+        H, W = img.shape[:2]
+        px, py = int(min(W - 1, max(0, x / 1000.0 * W))), int(min(H - 1, max(0, y / 1000.0 * H)))
+        lab = cv2.cvtColor(cv2.GaussianBlur(img, (5, 5), 0), cv2.COLOR_BGR2LAB)
+        mask = np.zeros((H + 2, W + 2), np.uint8)
+        d = (22, 12, 12)                              # 亮度放寬（陰影、反光），色度收緊（不要漫到同亮度的地板）
+        cv2.floodFill(lab, mask, (px, py), 0, d, d, 4 | cv2.FLOODFILL_FIXED_RANGE | cv2.FLOODFILL_MASK_ONLY | (255 << 8))
+        ys, xs = np.nonzero(mask[1:-1, 1:-1])
+        if len(xs) < 25 or len(xs) > 0.30 * W * H:
+            return fallback
+        x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+        if (x1 - x0) > 0.6 * W or (y1 - y0) > 0.8 * H:
+            return fallback
+        return [round(max(0, x0 - 4) * 1000.0 / W), round(max(0, y0 - 4) * 1000.0 / H),
+                round(min(W - 1, x1 + 4) * 1000.0 / W), round(min(H - 1, y1 + 4) * 1000.0 / H)]
+    except Exception:
+        return fallback
+
+
+def surface_extent(jpg: Optional[bytes], x: float, y: float):
+    """模型指到大面積物體（箱子）上的某一點 → 整個物體的框（0–1000）。跟 box_around 不同：用「跟那一點同色」的全部像素，
+    再水平閉運算把被夾著的東西擋住的缺口接起來，取包含那一點的連通塊。"""
+    try:
+        return _surface_extent(jpg, x, y)
+    except Exception:
+        return None
+
+
+def _surface_extent(jpg, x, y):
+    img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+    H, W = img.shape[:2]
+    px, py = int(min(W - 1, max(0, x / 1000.0 * W))), int(min(H - 1, max(0, y / 1000.0 * H)))
+    lab = cv2.cvtColor(cv2.GaussianBlur(img, (7, 7), 0), cv2.COLOR_BGR2LAB).astype(np.int16)
+    ref = np.median(lab[max(0, py - 4):py + 5, max(0, px - 4):px + 5].reshape(-1, 3), axis=0)
+    d = np.abs(lab - ref)
+    mask = ((d[:, :, 0] < 45) & (d[:, :, 1] < 10) & (d[:, :, 2] < 14)).astype(np.uint8)
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (max(3, int(W * 0.16)) | 1, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    c = lbl[py, px]
+    if c == 0:
+        return None
+    x0, y0, w, h, area = stats[c]
+    if area < 0.004 * W * H or w > 0.9 * W:
+        return None
+    return [round(x0 * 1000.0 / W), round(y0 * 1000.0 / H), round((x0 + w) * 1000.0 / W), round((y0 + h) * 1000.0 / H)]
+
+
 async def locate(llm, jpg: Optional[bytes], obj: str) -> Located:
     point, raw = await _point(llm, jpg, POINT_PROMPT.format(obj=obj))
     if point is None:
         return Located(found=False, raw=raw)
     x, y, label = point
+    if LOCK_HOOK is not None and "gripper" not in obj.lower():
+        try:
+            LOCK_HOOK(box_around(jpg, x, y), obj)
+        except Exception:
+            pass
     return Located(found=True, x=x, y=y, bearing_right_deg=round(bearing_from_x(x), 1), label=label, raw=raw)
+
+
+SURVEY_FRONT_PROMPT = (
+    'This photo is taken by a small robot looking forward and slightly down. There is a cardboard box on the floor. '
+    'List EVERY separate small object you can see near it (do not list the box itself, furniture, the robot\'s own black '
+    'gripper, or stickers/markers on the floor). For each one say where it STANDS: "on the box" only if it rests on the top '
+    'face of the cardboard box; "on the floor" if it stands on the floor beside or in front of the box; "elsewhere" otherwise. '
+    'Look carefully at what is under each object. Answer ONLY with JSON: '
+    '[{"label": "<colour + what it is>", "where": "on the box" | "on the floor" | "elsewhere", "point": [y, x]}] '
+    'with the point normalized to 0-1000. If you see none, answer [].'
+)
+
+
+async def survey_front(llm, jpg: Optional[bytes]):
+    """前鏡頭畫面裡箱子附近有哪些小物件、各自站在哪（箱子上 / 地上）。回 (list[dict] 或 None, raw)。實體場地沒有俯視相機時用。"""
+    if not jpg:
+        return None, "no camera image"
+    b64 = base64.b64encode(jpg).decode("ascii")
+    msg = UserMessage(content=[
+        ContentPartImageParam(image_url=ImageURL(url=f"data:image/jpeg;base64,{b64}", media_type="image/jpeg")),
+        ContentPartTextParam(text=SURVEY_FRONT_PROMPT),
+    ])
+    resp = await llm.ainvoke([msg])
+    raw = resp.completion if isinstance(resp.completion, str) else str(resp.completion)
+    import json as _json
+    import re as _re
+    m = _re.search(r"\[.*\]", raw, _re.S)
+    if not m:
+        return None, raw[:300]
+    try:
+        items = _json.loads(m.group(0))
+    except Exception:
+        return None, raw[:300]
+    out = []
+    for it in items if isinstance(items, list) else []:
+        if isinstance(it, dict) and it.get("label"):
+            out.append({"label": str(it["label"]), "where": str(it.get("where", "?")).lower(), "point": it.get("point")})
+    return out, raw[:300]

@@ -155,6 +155,8 @@ class RobotAgent:
         skills.set_task_context(task)   # 技能解析目標時可以回頭看整句任務（例如「from the table」）
         self.llm = llm
         self.robot = robot
+        # 視覺模型每指到一個目標，就把框送給 /live（見 perception.LOCK_HOOK）
+        perception.LOCK_HOOK = lambda box, label: asyncio.ensure_future(robot.post_lock(box, label))
         # 對應框架迴圈的 use_judge：互動模式(RobotAgent.py)預設開，robot_eval 的呼叫沒傳這個參數，
         # 維持 False，不動原本評測批次的行為——robot_eval 自己的 judge.py 事後看整條軌跡，更完整，
         # 這裡是給沒有經過 robot_eval、直接互動跑任務時，也能有一道「別只信自評」的檢查。
@@ -619,6 +621,21 @@ class RobotAgent:
 
     async def _h_pick(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
         return await self._skill(name, skills.pick(self.robot, self.llm, str(params.get("object", ""))))
+
+    async def _h_pick_from_top(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
+        return await self._skill(name, skills.pick_from_top(self.robot, self.llm, str(params.get("object", "")),
+                                                            params.get("surface_m"), params.get("object_h_m"),
+                                                            params.get("depth_m")))
+
+    async def _h_survey_scene(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
+        return await self._skill(name, skills.survey_scene(self.robot, self.llm))
+
+    async def _h_return_home(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
+        return await self._skill(name, skills.return_home(self.robot, self.llm))
+
+    async def _h_place_on_top(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
+        return await self._skill(name, skills.place_on_top(self.robot, self.llm, params.get("surface_m"), params.get("object_h_m"),
+                                                           params.get("depth_m")))
 
     async def _h_place(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
         return await self._skill(name, skills.place(self.robot, self.llm, str(params.get("target", ""))))

@@ -97,6 +97,13 @@ class RobotClient:
             await self.stop()
             return {"ok": False, "message": f"transport error: {type(e).__name__}: {e}"}
 
+    async def post_lock(self, box, label: str) -> None:
+        """/live 前鏡頭的目標框（相機座標 0–1000）。純旁路：舊版 server 沒有這個端點（404）也不影響任務。"""
+        try:
+            await asyncio.to_thread(self._json, "POST", "/lock", {"box": box, "label": label}, 3.0)
+        except Exception:
+            pass
+
     async def post_event(self, payload: dict[str, Any]) -> None:
         """把 agent 的任務／每一步思考丟給 robot_server 的 /live 儀表板看。純旁路：失敗一律吞掉、不影響任務。"""
         try:
