@@ -1,0 +1,37 @@
+{
+  "scene": "箱子直立，箱頂放一根白色管子和一顆球；地上站著一根橘色棒子；車在原點（左前輪對白點）",
+  "tasks": [
+    {"id": "o_e1", "difficulty": "easy", "category": "grounding",
+     "description": "箱子上面放了幾樣東西？回報數量和它們各是什麼，不要碰任何東西。",
+     "expected": "2 樣：白色管子和球。沒有碰東西，最後回到原點。", "reset": "不用動"},
+    {"id": "o_e2", "difficulty": "easy", "category": "grounding",
+     "description": "地上有什麼東西站著？回報它是什麼、什麼顏色，不要碰它。",
+     "expected": "橘色棒子。沒有碰東西。", "reset": "不用動"},
+    {"id": "o_e3", "difficulty": "easy", "category": "navigation",
+     "description": "往前開 0.3 公尺後停下，回報實際走了多少公尺，然後回到原點。",
+     "expected": "走了約 0.3 m（回報里程計實測值），最後回到原點。", "reset": "不用動"},
+    {"id": "o_e4", "difficulty": "easy", "category": "navigation",
+     "description": "原地向左轉 90 度，回報實際轉了幾度，然後回到原點的朝向。",
+     "expected": "轉了約 90 度（回報實測值），最後車頭朝回原方向。", "reset": "不用動"},
+    {"id": "o_e5", "difficulty": "easy", "category": "reasoning",
+     "description": "箱子上的東西和地上的東西，哪一個離你比較近？只回報，不要碰任何東西。",
+     "expected": "答案要和現場一致（看你怎麼擺），沒有碰東西。", "reset": "不用動"},
+
+    {"id": "o_m1", "difficulty": "medium", "category": "manipulation",
+     "description": "把箱子上的白色管子拿起來，再放回箱子上。",
+     "expected": "白色管子被夾起來、放回箱頂後還站著；箱子和球沒被碰倒；回到原點。", "reset": "管子倒了或移位就擺回去"},
+    {"id": "o_m2", "difficulty": "medium", "category": "reasoning",
+     "description": "把箱子上的橘色棒子拿起來。",
+     "expected": "陷阱題：棒子在地上不在箱子上。應該回報前提不成立、不拿任何東西（不能拿管子代替）；回到原點。", "reset": "不用動"},
+    {"id": "o_m3", "difficulty": "medium", "category": "reasoning",
+     "description": "箱子上有一樣東西是用來裝東西的容器，把它拿起來再放回箱子上；另一樣不要碰。",
+     "expected": "選白色管子（不是球），夾起來再放回箱頂；球沒被碰；回到原點。", "reset": "管子倒了或移位就擺回去"},
+
+    {"id": "o_h1", "difficulty": "hard", "category": "manipulation",
+     "description": "把地上的橘色棒子拿起來，再把它直立放回地上。",
+     "expected": "棒子被夾起來（沒有先被推倒）、放回地上後還站著；回到原點。", "reset": "棒子擺回原位、直立"},
+    {"id": "o_h2", "difficulty": "hard", "category": "manipulation",
+     "description": "把地上的橘色棒子拿起來，放到箱子上。",
+     "expected": "棒子最後直立在箱頂；箱子、瓶子、球沒被撞倒；回到原點。", "reset": "棒子擺回地上、箱頂的東西擺好"}
+  ]
+}

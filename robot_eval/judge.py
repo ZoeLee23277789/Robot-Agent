@@ -205,6 +205,35 @@ def _all_states(history: dict) -> list:
     return out
 
 
+# 2026-11-16：agent 的結案報告從 11/11 起規定寫繁體中文，下面 report 型 milestone 的 regex / 顏色詞卻都是英文，
+# 答對也比不到（all_20261115_214001：e07、r06、r14、r20、t15、n08、t07 七題答對被判失敗）。比對前先把中文關鍵詞
+# 就地換成英文（保留出現順序，landmark_order 要用），數字跟中文字之間補空白讓 \b 成立。長詞排前面（粉紅 要比 紅 先換）。
+_ZH_EN = [
+    # 陷阱題（r13、t16）的否定句：整句先換，後面的顏色詞才不會把它拆散
+    ("位於地板上", "on the floor"), ("在地板上", "on the floor"), ("在地上", "on the floor"), ("而非桌面上", "not on the table"),
+    ("不在桌", "not on the table "), ("沒有發現黃色杯子", "no yellow cup"), ("沒有黃色杯子", "no yellow cup"),
+    ("沒有黃色的杯子", "no yellow cup"), ("沒有看到黃色杯子", "no yellow cup"), ("找不到黃色杯子", "no yellow cup"),
+    ("粉紅", "pink"), ("萊姆", "lime"), ("青檸", "lime"), ("藍綠", "teal"), ("青色", "cyan"),
+    ("紙箱", "carton"), ("紙盒", "carton"), ("寶特瓶", "bottle"), ("塑膠瓶", "bottle"), ("塑料瓶", "bottle"), ("瓶子", "bottle"),
+    ("汽水罐", "can"), ("鋁罐", "can"), ("罐子", "can"), ("長椅", "bench"),
+    ("空的", "empty"), ("沒有任何", "nothing"), ("高於", "higher"), ("還要高", "higher"), ("比較高", "higher"),
+    ("藍", "blue"), ("綠", "green"), ("紅", "red"), ("黃", "yellow"), ("白", "white"), ("黑", "black"),
+    ("橘", "orange"), ("橙", "orange"), ("紫", "purple"), ("球", "ball"),
+    ("兩", "2"), ("二", "2"), ("三", "3"), ("四", "4"), ("五", "5"), ("六", "6"), ("七", "7"), ("八", "8"),
+]
+
+
+def _report_text_en(text: str) -> str:
+    """報告原文 + 就地翻成英文關鍵詞的版本（原文保留在前面：英文報告的行為完全不變）。"""
+    if not re.search(r"[\u4e00-\u9fff]", text or ""):
+        return text or ""
+    t = text
+    for zh, en in _ZH_EN:
+        t = t.replace(zh, " %s " % en)
+    t = re.sub(r"(\d+)", r" \1 ", t)
+    return t
+
+
 def check_report(milestone: dict, history: dict) -> Optional[MilestoneResult]:
     """report 型 milestone（確定性的，不用 LLM）：
     regex           最終報告要符合的正規表示式（例如「四種顏色」這種有標準答案的題）。
@@ -214,7 +243,7 @@ def check_report(milestone: dict, history: dict) -> Optional[MilestoneResult]:
     cond = milestone.get("report")
     if not cond:
         return None
-    text = history.get("final_text") or ""
+    text = _report_text_en(history.get("final_text") or "")
     if cond.get("regex"):
         ok = re.search(cond["regex"], text, re.I) is not None
         return MilestoneResult(milestone["id"], milestone["description"], ok, "report",
