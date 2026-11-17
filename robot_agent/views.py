@@ -123,10 +123,6 @@ class RunResult(BaseModel):
     def number_of_steps(self) -> int:
         return len(self.steps)
 
-    def action_names(self) -> list[str]:
-        """依執行順序列出送出過的每個動作名稱，跨所有步驟攤平。"""
-        return [a.name for s in self.steps for a in s.actions]
-
     def final_result(self) -> str:
         return self.final_text
 

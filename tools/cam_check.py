@@ -5,16 +5,16 @@
   .venv/bin/python tools/cam_check.py watch    # 每 1.5 秒量一次，邊調相機邊看，Ctrl+C 結束"""
 import json, os, sys, time, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from robot_agent import skills
+from robot_agent import skills_nexarm
 U, REAL = "http://127.0.0.1:8765", "http://127.0.0.1:8767"
-TX, TY = skills.NEX_GAP_REF
+TX, TY = skills_nexarm.NEX_GAP_REF
 r = urllib.request.Request(U + "/action", json.dumps({"name": "arm_to", "params": {"x_mm": 380, "y_mm": 120, "pitch_deg": 0, "yaw_deg": 0}}).encode(), {"Content-Type": "application/json"})
 urllib.request.urlopen(r, timeout=40).read(); time.sleep(1.2)
 try:
     for _ in range(600 if len(sys.argv) > 1 else 1):
         urllib.request.urlopen(REAL + "/frame.jpg", timeout=8).read(); time.sleep(0.2)
         jpg = urllib.request.urlopen(REAL + "/frame.jpg", timeout=8).read()
-        g = skills._gripper_gap_cv(jpg)
+        g = skills_nexarm._gripper_gap_cv(jpg)
         if g is None:
             print("畫面裡找不到夾爪：相機偏太多了，先大致對著夾爪前方的地板", flush=True)
         else:

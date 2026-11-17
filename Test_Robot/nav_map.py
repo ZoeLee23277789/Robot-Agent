@@ -88,10 +88,6 @@ def cell_to_world(ix, iy):
     return -EXTENT + (ix + 0.5) * CELL, -EXTENT + (iy + 0.5) * CELL
 
 
-def _wrap(deg):
-    return (deg + 180.0) % 360.0 - 180.0
-
-
 class NavMap(object):
     def __init__(self, sim, robot_root):
         self.sim = sim
@@ -395,20 +391,6 @@ class NavMap(object):
     def clearance_at(self, x, y):
         ix, iy = world_to_cell(x, y)
         return float(self.clearance[iy, ix]) if self.clearance is not None else 0.0
-
-    def best_lateral(self, x, y, ux, uy, max_off=0.15, step=0.05):
-        """通道出入口的側向微調：沿垂直於軸的方向在 ±max_off 內挑離真實障礙最遠的點
-        （隧道北口正貼著球桶，走正中線只剩 3 cm，往另一側偏 15 cm 就不會擦到）。"""
-        nx, ny = -uy, ux
-        best = (self.clearance_at(x, y), x, y)
-        k = -max_off
-        while k <= max_off + 1e-9:
-            cx, cy = x + nx * k, y + ny * k
-            c = self.clearance_at(cx, cy)
-            if c > best[0] + 1e-6:
-                best = (c, cx, cy)
-            k += step
-        return best[1], best[2]
 
     def mark_blocked(self, x, y, r_cells=2):
         """把 (x, y) 附近一小塊標成動態障礙——但不標通道格：通道裡 ToF 看到的多半是牆，標了就把唯一的路封死。"""

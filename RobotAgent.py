@@ -61,7 +61,7 @@ async def amain() -> None:
 
     health = await robot.health()
     if not health.get("ok"):
-        raise SystemExit(f"❌ {health.get('message')}\n   請先在機器人那一端執行：./start_all.sh（或 ./start_server.sh sim）")
+        raise SystemExit(f"❌ {health.get('message')}\n   請先在機器人那一端執行：./start_all.sh")
     check_link(health)
     mode = health.get("mode", "?")
     # 實體機器人（含桌上的 NexArm）預設每一步都要人按 Enter；模擬器和 mock 預設直接跑

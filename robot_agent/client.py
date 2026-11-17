@@ -16,7 +16,7 @@ def check_link(health: dict) -> None:
     if health.get("robot_link") == "lost":
         raise SystemExit(
             "❌ robot_server 還在，但它跟機器人的連線已經斷了 (" + str(health.get("detail")) + ")\n"
-            "   修復：1) CoppeliaSim 按播放  2) 在 server 的終端機按 Ctrl+C  3) 重新執行 ./start_server.sh")
+            "   修復：1) CoppeliaSim 按播放  2) 在 server 的終端機按 Ctrl+C  3) 重新執行 ./start_all.sh --restart")
 
 
 class RobotClient:

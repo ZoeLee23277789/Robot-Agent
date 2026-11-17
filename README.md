@@ -34,8 +34,7 @@ RobotAgent.py      進入點 (--task / --loop)              robot_server.py
    這一步只重開「控制程式」；如果機器人在模擬裡卡進了什麼東西（例如卡在牆角/球池邊界），要另外在 CoppeliaSim 裡把模擬停止再重新播放一次才會真的重置姿態。
 3. 跑任務：
    ```bash
-   ./run_task.sh "Rotate to find the red box, then drive up to it and stop about 30 cm away"   # 準備+執行一次到底
-   ./run_agent.sh --task "..."      # 前提是 start_all.sh 已經跑過
+   ./run_agent.sh --task "Rotate to find the red box, then drive up to it and stop about 30 cm away"   # 前提是 start_all.sh 已經跑過
    ./run_agent.sh --loop            # 互動模式，一直問你下一個任務是什麼
    ./run_agent.sh --task "..." --no-judge   # 關掉完成後的自我查核（見下）
    ```
@@ -50,7 +49,7 @@ RobotAgent.py      進入點 (--task / --loop)              robot_server.py
    ```
    預設 3 倍速（模擬器只跑約 0.55 倍即時），輸出在 `videos/`（已加進 .gitignore），agent 的終端輸出存在同名 `.agent.log`。有 ffmpeg 時錄完會自動轉成 H.264。
 
-沒有模擬器也想先測 Agent 迴圈的話，用 `./start_server.sh mock`（等同 `python Test_Robot/robot_server.py --mode mock`），它會模擬一台 2D 機器人和一個紅色目標，不需要安裝 SDK。
+沒有模擬器也想先測 Agent 迴圈的話，用 `~/rmenv/bin/python -u Test_Robot/robot_server.py --mode mock`，它會模擬一台 2D 機器人和一個紅色目標，不需要安裝 SDK。
 
 ## 指令速查（模擬 / 實體機器人）
 
@@ -94,7 +93,7 @@ approach/pick/place/scan_overhead 在真機上不能用，模擬的分數不能�
 export RM_CONN_TYPE=ap
 ping -c 2 192.168.2.1                                      # 直連模式先確認通
 (cd Test_Robot && ~/rmenv/bin/python test_movement.py real) # 煙霧測試：前進約 0.4 m、轉一下、夾爪、手臂、相機
-./start_server.sh real --chassis-backend move              # 終端機 A，開著不要關
+~/rmenv/bin/python -u Test_Robot/robot_server.py --mode real --chassis-backend move              # 終端機 A，開著不要關
 ./run_agent.sh --task "往前走 0.3 公尺，然後左轉 90 度"      # 終端機 B
 unset RM_CONN_TYPE                                         # 收尾，回模擬前
 ```
@@ -137,8 +136,8 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ~/rmenv/bin/python Test_Robot/nexarm_nudge.py --to 150,0,250 --go  # 單一動作測試（不加 --go 只印封包）
 
 kill $(lsof -t -i:8765) 2>/dev/null
-./start_server.sh armonly                 # 只有桌上的 NexArm，沒有底盤、沒有相機；move_chassis 會回「不可用」
-./start_server.sh real --arm nexarm       # 之後裝上 EP：底盤用 EP、手臂用 NexArm
+~/rmenv/bin/python -u Test_Robot/robot_server.py --mode armonly                 # 只有桌上的 NexArm，沒有底盤、沒有相機；move_chassis 會回「不可用」
+~/rmenv/bin/python -u Test_Robot/robot_server.py --mode real --arm nexarm       # 之後裝上 EP：底盤用 EP、手臂用 NexArm
 ./run_agent.sh --task "把夾爪打開，手臂抬高 5 公分，再把夾爪合起來"   # armonly 跟 real 一樣每步都會先問
 ```
 
@@ -252,7 +251,7 @@ EP Core 套裝附的紅外線深度感測器（ToF，0.1–10 m、視角 20°，
 - **視窗版**：`tools/sim_twin.py --real http://127.0.0.1:8767` 把里程計位姿搬到空場景的機器人上，`/map.json` 的占據格畫成灰色長方體
   （每列相鄰格合併、靜態、不碰撞；版本號沒變就不重畫），路徑綠線、出發點藍框、目標洋紅框。
   RoboMaster 模型根物件的座標系不是 x 前 z 上（前後輪差在 z 軸），分身用四個輪子的位置算出「前／左／上」再擺（`upright_frame`），不然車頭會朝地。
-- **診斷**：`RM_CONN_TYPE=sta ~/rmenv/bin/python tools/ep_tof_probe.py` 印 SDK 四個插槽的原始值（8767 要先關）。`ROBOT_TOF_OFFSET_M` = ToF 離車身中心的距離（預設 0.16）。
+- `ROBOT_TOF_OFFSET_M` = ToF 離車身中心的距離（預設 0.16）。
 - **限制**：一顆前向 20° ToF，側面盲；里程計會漂（麥克納姆輪打滑），沒有閉環，一個房間（約 4 m²）可以、整層樓不行。相機只認東西，距離靠 ToF。
 
 ## 2026-10-22 的一批修正（批次 all_20261021 之後）
@@ -397,7 +396,7 @@ ssh -N -L 8765:127.0.0.1:8765 user@robot-host
 ./run_agent.sh --task "..."                      # 照樣連 127.0.0.1:8765
 ```
 
-如果一定要讓 server 聽在區網上，請加 token：`./start_server.sh real --host 0.0.0.0 --token <secret>`，Agent 端設定環境變數 `ROBOT_SERVER_TOKEN` 或用 `--robot-token`。
+如果一定要讓 server 聽在區網上，請加 token：`~/rmenv/bin/python -u Test_Robot/robot_server.py --mode real --host 0.0.0.0 --token <secret>`，Agent 端設定環境變數 `ROBOT_SERVER_TOKEN` 或用 `--robot-token`。
 
 ## 安全設計
 
@@ -503,6 +502,7 @@ robot_agent/
   service.py                主迴圈：觀察→思考→行動、planner、長期摘要、自我查核、token 統計、動作 handler
   actions.py                動作註冊表（參數 schema + 說明 + handler 名稱）
   skills.py                 go_to/approach/drive_through/pick/place（伺服器閉迴路 + 感測器驗證）
+  skills_nexarm.py          實體場地（EP + NexArm）專用：pick_from_top/place_on_top/survey_scene/return_home（相機 + 實體 ToF + 手臂回報）
   llm/                      各家 LLM 的呼叫包裝與訊息型別（改寫自 browser-use 的 llm 子套件，MIT）
   perception.py             locate/face/locate_overhead/align_to_tunnel 的視覺+幾何運算
   client.py                 HTTP client
@@ -514,12 +514,12 @@ Test_Robot/                機器人端 (rmenv, Python 3.6-3.8)
   rm_connection.py           你的連線模組，sim 與 real 的切換只在這裡
   patch_ftp.py               模擬器沒有 FTP，讓 SDK 不會卡在等待的補丁 (rm_connection 會 import)
   test_movement.py           SDK 煙霧測試，懷疑連線有問題時先跑它
-  camera_check.py / diag_physics.py / reset_robot.py   相機檢查、物理診斷、手動重置姿態的小工具
+  reset_robot.py                                      手動重置姿態的小工具
 Env/                       CoppeliaSim 場景與感測器建置腳本 (.venv 執行)
   build_playground_new.py    目前使用的場景（球池/隧道/平台/柱子…）；build_playground.py 等是其他場景
   add_overhead_camera.py     加俯視攝影機
   add_proximity_sensors.py   獨立的距離感測器建立腳本 (robot_server.py 開機會自動做，通常不用手動跑)
-start_all.sh / run_task.sh / run_agent.sh / start_server.sh   啟動腳本（都從 repo 根目錄執行）
+start_all.sh / run_agent.sh   啟動腳本（都從 repo 根目錄執行）
 start_sim_headless.sh                                        無視窗啟動 CoppeliaSim 並載入場景（跑分批次用；--stop 關閉）
 run_all.sh                                                   一鍵背景跑全部任務（無視窗模擬 + run_batch.py --restart-sim，模擬器當掉自動重開、該題重跑；--stop 中止）；
                                                              成績即時顯示在 /live 的 batch results

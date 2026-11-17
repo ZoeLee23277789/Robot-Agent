@@ -23,7 +23,6 @@ except Exception:  # pragma: no cover
 
 CALIB_PATH = os.path.expanduser("~/.robot_cam_floor_calib.json")
 MIN_RUN_PX = 14          # 連續這麼多像素不是地板才算邊界（反光、接縫會短暫跳出）
-LAB_TOL = 14.0           # 跟地板參考色的 Lab 距離（L 佔權重較低，反光才不會整片被當障礙）
 EDGE_COLS_STEP = 4       # 每 4 欄取一筆
 HALF_FOV_USE_DEG = 28.0  # 只用中央 ±28°（鏡頭邊緣畸變大）
 H_FOV_DEG = 104.0        # EP 相機 16:9 的水平視角（官方 120° 對角）約 104°

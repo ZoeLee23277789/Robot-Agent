@@ -30,7 +30,7 @@ from robot_agent.llm.messages import (
     UserMessage,
 )
 
-from robot_agent import perception, skills
+from robot_agent import perception, skills, skills_nexarm
 from robot_agent.actions import ACTION_SPECS
 from robot_agent.client import RobotClient
 from robot_agent.views import (
@@ -623,18 +623,18 @@ class RobotAgent:
         return await self._skill(name, skills.pick(self.robot, self.llm, str(params.get("object", ""))))
 
     async def _h_pick_from_top(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills.pick_from_top(self.robot, self.llm, str(params.get("object", "")),
+        return await self._skill(name, skills_nexarm.pick_from_top(self.robot, self.llm, str(params.get("object", "")),
                                                             params.get("surface_m"), params.get("object_h_m"),
                                                             params.get("depth_m")))
 
     async def _h_survey_scene(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills.survey_scene(self.robot, self.llm))
+        return await self._skill(name, skills_nexarm.survey_scene(self.robot, self.llm))
 
     async def _h_return_home(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills.return_home(self.robot, self.llm))
+        return await self._skill(name, skills_nexarm.return_home(self.robot, self.llm))
 
     async def _h_place_on_top(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills.place_on_top(self.robot, self.llm, params.get("surface_m"), params.get("object_h_m"),
+        return await self._skill(name, skills_nexarm.place_on_top(self.robot, self.llm, params.get("surface_m"), params.get("object_h_m"),
                                                            params.get("depth_m")))
 
     async def _h_place(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:

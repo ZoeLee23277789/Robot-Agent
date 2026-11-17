@@ -5,7 +5,7 @@ import asyncio, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
-from robot_agent import RobotClient, skills
+from robot_agent import RobotClient, skills, skills_nexarm
 from robot_agent.llm_factory import build_llm
 
 
@@ -19,15 +19,15 @@ async def main():
         if st == "approach":
             ok, msg = await skills.approach(robot, llm, "box", 0.2)
         elif st == "pick":
-            ok, msg = await skills.pick_from_top(robot, llm, obj, float(os.environ['SURF']) if os.environ.get('SURF') else None, float(os.environ['OBJ_H']) if os.environ.get('OBJ_H') else None)
+            ok, msg = await skills_nexarm.pick_from_top(robot, llm, obj, float(os.environ['SURF']) if os.environ.get('SURF') else None, float(os.environ['OBJ_H']) if os.environ.get('OBJ_H') else None)
         elif st == "place":
-            ok, msg = await skills.place_on_top(robot, llm, float(os.environ['PLACE_SURF']) if os.environ.get('PLACE_SURF') else None)
+            ok, msg = await skills_nexarm.place_on_top(robot, llm, float(os.environ['PLACE_SURF']) if os.environ.get('PLACE_SURF') else None)
         else:
-            ok, msg = await skills.return_home(robot, llm)
+            ok, msg = await skills_nexarm.return_home(robot, llm)
         print("STEP %s ok=%s\n%s\n" % (st, ok, msg))
         if not ok and st != "place":
             if "home" in steps and st != "home":           # 失敗也要回原位（使用者 2026-11-14：「每次記得自己走回原位」）
-                print("STEP home ok=%s\n%s\n" % (await skills.return_home(robot, llm)))
+                print("STEP home ok=%s\n%s\n" % (await skills_nexarm.return_home(robot, llm)))
             break
 
 asyncio.run(main())
