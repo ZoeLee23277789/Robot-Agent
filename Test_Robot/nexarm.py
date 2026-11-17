@@ -32,17 +32,40 @@ CMD_GET_CUR_COORDS = 11
 COUNTS_PER_DEG = 4096 / 360.0   # 伺服一圈 4096 格
 SERVO_CENTER = 2048
 CLAW_OPEN = -60     # 韌體 AiLLMControl 的 open_claw 用這個值
+# 2026-11-14：−60 的開口夾不進直徑 5 cm 的棍子（使用者：「爪子要開到全開，不然抓不到」）；實體 server 用 NEXARM_CLAW_OPEN=-90 開到底。
+import os as _os_claw
+try:
+    CLAW_OPEN = int(float(_os_claw.environ.get("NEXARM_CLAW_OPEN", CLAW_OPEN)))
+except ValueError:
+    pass
 CLAW_CLOSE = 50     # 韌體搖桿模式允許的最大值，空夾爪實測轉得到位
 HOLD_SHORTFALL_DEG = 4.0   # 夾爪伺服停在離目標這麼多度以上 → 被東西擋住了（空夾實測誤差 ≤ 0.3°）
 
 HOME = (150.0, 0.0, 250.0, 0.0)   # x, y, z, pitch：實測可達、手腕水平，當 recenter 的姿態
+# 2026-11-14：EP 相機改裝到手臂上節之後，(150,250) 這個 HOME 相機看天花板；開機的休息姿勢 (160,136,俯 26°) 才是平視前方。
+# NEXARM_HOME="x,y,z,pitch" 可以把 recenter 的姿態換掉（模擬與實體兩個 server 都要設同一個值）。
+import os as _os
+if _os.environ.get("NEXARM_HOME", "").strip():
+    try:
+        HOME = tuple(float(v) for v in _os.environ["NEXARM_HOME"].split(","))
+        assert len(HOME) == 4
+        print("[nexarm] HOME 改成 %s（NEXARM_HOME）" % (HOME,))
+    except Exception as _e:
+        HOME = (150.0, 0.0, 250.0, 0.0)
+        print("[nexarm] NEXARM_HOME 看不懂（%s），用預設 HOME" % _e)
 # 收攏姿勢（2026-11-10 nexarm_fold_test.py 實測）：夾爪朝下、垂在底座正上方，誤差 0 mm。整支手臂前後都收在底座上方，
 # 最高點是肘（約 290 mm，比 HOME 的 307 矮），肘在底座後方約 145 mm。再低 10 mm（z 130）就開始到不了。
 STOW = (0.0, 0.0, 150.0, -90.0)
 # 外框：各軸的絕對界線。x/z 真正到得了的區域不是方的，看 REACH（nexarm_workspace.py 掃出來的表）。
 # z 下限 30：末端再低就碰到桌面（韌體搖桿模式也是 30）。x 下限看 x_min_for_pitch：夾爪水平時縮到 90 以內伺服就停在離目標
 # 10 mm 以上（實測 80 差 12 mm），夾爪朝下則一路縮到 0 都精準。
-WORKSPACE = {"x": (-460.0, 460.0), "y": (-460.0, 460.0), "z": (30.0, 560.0),
+# 2026-11-15：z 下限 30 是手臂放在桌上時的設定。裝在車頂（底座平面離地 0.162 m）時，車頭前方是空的，夾爪伸到車頭前面可以再往下降到
+# 接近地板（使用者：「他應該可以拿地上的東西」）。NEXARM_Z_MIN（mm，可為負）放寬下限；低於 30 只在前伸 ≥ NEXARM_LOW_R_MIN 時允許
+# （再近會撞到車頭）。預設不變。
+import os as _os_z
+Z_MIN_MM = float(_os_z.environ.get("NEXARM_Z_MIN", "30"))
+LOW_R_MIN_MM = float(_os_z.environ.get("NEXARM_LOW_R_MIN", "280"))
+WORKSPACE = {"x": (-460.0, 460.0), "y": (-460.0, 460.0), "z": (min(30.0, Z_MIN_MM), 560.0),
              "pitch": (-90.0, 10.0), "roll": (-90.0, 90.0), "claw": (-90.0, 50.0)}
 
 
@@ -133,6 +156,8 @@ class ReachMap(object):
         return self.FOLDED_Z_CAP_MM + t * (max(outer) - self.FOLDED_Z_CAP_MM)
 
     def reachable(self, r, z, pitch):
+        if z < 30.0:        # 桌面以下：表裡沒有，只有放寬下限、而且伸到車頭前面時才算可達（實機到不到由回授判定）
+            return Z_MIN_MM < 30.0 and z >= Z_MIN_MM and r >= LOW_R_MIN_MM and r <= 450.0 and pitch >= -60.0
         cap = self._z_cap(r, pitch)
         return (z >= WORKSPACE["z"][0] and r >= WORKSPACE["x"][0]
                 and (cap is None or z <= cap + 1e-6)
@@ -142,7 +167,9 @@ class ReachMap(object):
         """在這個水平距離、這個俯仰角下，高度的 [最低, 最高]（已扣掉桌面）；到不了回 None。
         只取包含連續一段的最外圍；夾爪水平時中間有洞（前伸 150 最低 200）也一併反映在最低值裡。"""
         rs = self._snap(r)
-        zs = [z for (x, z) in self._grid(pitch) if x == rs and z >= WORKSPACE["z"][0]]
+        zs = [z for (x, z) in self._grid(pitch) if x == rs and z >= 30.0]
+        if zs and Z_MIN_MM < 30.0 and r >= LOW_R_MIN_MM and pitch >= -60.0 and min(zs) <= 40:
+            zs.append(int(Z_MIN_MM))
         if not zs:
             return None
         cap = self._z_cap(r, pitch)

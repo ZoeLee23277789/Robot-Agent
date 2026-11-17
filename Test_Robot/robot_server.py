@@ -53,6 +53,13 @@ except Exception:  # mock 模式下沒有 cv2 也能跑，只是沒有畫面
 # ============================================================================
 # 安全上限：LLM 給的任何數值都會先被夾進這個範圍
 # ============================================================================
+# 2026-11-14：EP 的相機裝在 NexArm 夾爪下面、排線很短，手臂抬超過約 300 mm 線就被扯掉（使用者：「他不需要抬這麼高，
+# 不然我的相機一直掉」）。system_prompt 說了不准抬高，agent 還是會自己下 arm_to y_mm=380，所以在伺服器端硬夾：
+# 模擬與實體都夾（否則模擬說「到了 380」、實體卻被擋，agent 看不出差別）。ROBOT_ARM_MAX_Z_MM=0 關掉。
+# 2026-11-14 下午：相機改裝到手臂頂端後跑 tools/arm_cable_test.py，11 個方向全程排線都不緊（Test_Robot/nexarm_cable_limits.json），
+# 所以預設不再夾（0）；哪天相機又裝回夾爪下面，設 ROBOT_ARM_MAX_Z_MM=300。
+NEX_MAX_Z_MM = float(os.environ.get("ROBOT_ARM_MAX_Z_MM", "0"))
+
 LIMITS = {
     "forward_m": 1.0,       # 單一動作最多前後 1 公尺
     "right_m": 1.0,         # 單一動作最多左右 1 公尺
@@ -73,9 +80,10 @@ LIMITS = {
 FRESH_FRAMES = int(os.environ.get("ROBOT_FRESH_FRAMES", "3"))
 
 try:
-    from nav_map import NavMap, world_to_cell  # 占據格地圖 + A*，跟這支檔案同目錄（機器人端）
+    from nav_map import NavMap, TofMap, world_to_cell  # 占據格地圖 + A*，跟這支檔案同目錄（機器人端）
+    from cam_floor import FloorRanger                    # 前鏡頭地板邊界測距（explore 模式）
 except Exception as _nav_import_err:  # 沒有 numpy/cv2 時其他功能照常，只是不能導航
-    NavMap = None
+    NavMap = TofMap = FloorRanger = None
     world_to_cell = None
     print("[server] nav_map 載入失敗（%s），navigate_to/drive_through 不可用" % _nav_import_err)
 
@@ -177,10 +185,20 @@ ACTION_DOCS = [
                                        "approach_from_deg": "float|null"},
      "doc": "plan a collision-free path on the occupancy map and drive to world (x, y); stop_m stops that far before the point and faces it; "
             "approach_from_deg (world angle, target -> standing point) forces which side to stand on"},
+    {"name": "scan_around", "params": {"step_deg": "float (optional, default 15)"},
+     "doc": "explore mode only: turn a full circle in steps, reading the front distance sensor at each stop to fill the occupancy map; "
+            "reports the nearest obstacle per 45-degree sector"},
+    {"name": "explore", "params": {"steps": "int (optional, default 1)", "bounds": "[xmin, xmax, ymin, ymax] (optional, world metres; outside is treated as wall)",
+                                   "detail": "bool (optional: look closer, 1 m / 10-degree scans)"},
+     "doc": "explore mode only: drive to the nearest edge between mapped and unmapped space, scan there; repeat up to steps times"},
+    {"name": "set_bounds", "params": {"bounds": "[xmin, xmax, ymin, ymax]"},
+     "doc": "explore mode only: change the exploration bounds without moving"},
     {"name": "drive_through", "params": {"name": "tunnel|platform"},
      "doc": "drive through a pass-through structure along its long axis, entrance to exit"},
     {"name": "go_to_landmark", "params": {"name": "landmark", "stop_m": "float"},
      "doc": "navigate to a fixed landmark: pass-through structures -> their entrance, others -> their front edge, facing it"},
+    {"name": "forget_real_obstacles", "params": {},
+     "doc": "drop the temporary obstacles the real front distance sensor added to the map (only when told they were moved away)"},
 ]
 
 
@@ -251,9 +269,10 @@ def _find_robot_root(sim):
 
 
 class RoboMasterBackend(object):
-    def __init__(self, mode, chassis_backend="move", arm="sdk", arm_port="/dev/nexarm"):
+    def __init__(self, mode, chassis_backend="move", arm="sdk", arm_port="/dev/nexarm", explore=False):
         self.mode = mode
         self.chassis_backend = chassis_backend
+        self.explore = bool(explore) and mode == "real"   # 陌生環境：實體自己建圖（ToF + 里程計），見 _start_tof_map
         self.telemetry = {}
         self._tlock = threading.Lock()
         self._stall_count = 0  # 連續幾次「完全沒動、旁邊又沒東西擋」，用來偵測控制腳本整個卡死
@@ -276,6 +295,12 @@ class RoboMasterBackend(object):
             self._connect_robot()
         self._start_prox_sensors()
         self._start_overhead_cam()
+        if self.explore:
+            self._start_tof_map()
+        elif mode == "real":
+            # 2026-11-13：沒開 --explore 的實體模式也要有 world_xy / world_heading_deg（/live、tools/sim_twin.py --real 都靠它），
+            # 不然掃描場地那種「地圖在模擬、實體只鏡射」的跑法，分身讀到 None 就擺不出車的位置
+            threading.Thread(target=self._poll_world_pose, daemon=True, name="world-pose").start()
         if self._want_nexarm:
             if mode == "sim":
                 self._start_nexarm_sim()
@@ -303,6 +328,12 @@ class RoboMasterBackend(object):
             print("[server] 連線成功，韌體版本：", self.ep.get_version())
         except Exception as e:
             print("[server] 取不到韌體版本 (可忽略)：", e)
+        try:
+            # 2026-11-13：上一個 server 被殺時（SIGKILL、zmq assert）底盤的速度指令會留在模擬器/車上，無視窗的車自己滑到牆邊、
+            # 出發點跟著記錯（實測兩次漂 1.2 m）。連上第一件事就是歸零速度。
+            self.ep.chassis.drive_speed(x=0, y=0, z=0)
+        except Exception as e:
+            print("[server] 連線後歸零底盤速度失敗（可忽略）：", e)
 
         self._camera_ok = False
         self._camera_fail_streak = 0
@@ -808,7 +839,9 @@ class RoboMasterBackend(object):
             print("[server] 占據格地圖建立失敗（%s），navigate_to/drive_through 不可用" % e)
 
     def _nav_pose(self):
-        """機器人真實世界姿態 (x, y, heading_deg)，用導航專用的 zmq 連線讀。"""
+        """機器人真實世界姿態 (x, y, heading_deg)，用導航專用的 zmq 連線讀；explore 模式（沒有 zmq）用里程計。"""
+        if getattr(self, "_nav_sim", None) is None:
+            return self._odom_pose()
         last = None
         for attempt in range(3):   # 偶發的 zmq 錯誤不該讓整段導航放棄：重試三次再說
             try:
@@ -826,16 +859,46 @@ class RoboMasterBackend(object):
         try:
             x = pose[0] + dist_m * math.cos(math.radians(pose[2]))
             y = pose[1] + dist_m * math.sin(math.radians(pose[2]))
-            self._nav.mark_blocked(x, y)
+            with getattr(self, "_nav_lock", threading.Lock()):
+                self._nav.mark_blocked(x, y)
         except Exception as e:
             print("[server] 標記障礙失敗：%s" % e)
 
     # 前鏡頭畫面上的框：相機 x 軸朝車的左邊，畫面已經不是鏡像（2026-10-22 修正），所以 x = 中心 - u。
     FRAME_MIRROR = -1.0
 
+    CAM_LOCK_SECONDS = 12.0
+
+    def _draw_cam_lock(self, jpg):
+        """相機座標的目標框（2026-11-16）：agent 的視覺模型在某一張畫面上指到目標時 POST /lock 存下來的框（0–1000）。
+        實體場地沒有物件的世界座標，下面那套「世界座標投影」畫不出來。框是那一張畫面上的位置，車或手臂一動就不準了，
+        所以只顯示 CAM_LOCK_SECONDS 秒、越舊越淡；技能每次重新看都會更新。只讀自己的屬性，不碰 zmq。"""
+        lk = getattr(self, "_cam_lock", None)
+        if jpg is None or lk is None or cv2 is None:
+            return jpg
+        age = time.time() - lk["t"]
+        if age > self.CAM_LOCK_SECONDS:
+            return jpg
+        try:
+            img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+            H, W = img.shape[:2]
+            b = lk["box"]
+            x0, y0, x1, y1 = int(b[0] / 1000.0 * W), int(b[1] / 1000.0 * H), int(b[2] / 1000.0 * W), int(b[3] / 1000.0 * H)
+            col = (255, 0, 255) if age < 4 else (200, 120, 200)
+            cv2.rectangle(img, (x0, y0), (x1, y1), col, 2)
+            txt = "%s%s" % (str(lk.get("label", "target"))[:40], "" if age < 4 else " (%.0fs ago)" % age)
+            ty = y0 - 6 if y0 > 18 else min(H - 4, y1 + 14)
+            cv2.putText(img, txt, (max(2, min(x0, W - 8 * len(txt))), ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
+            cv2.putText(img, txt, (max(2, min(x0, W - 8 * len(txt))), ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1)
+            ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            return buf.tobytes() if ok else jpg
+        except Exception as e:
+            print("[server] 目標框畫不出來：%s" % e)
+            return jpg
+
     def frame_live_jpeg(self, width=640):
         """/live 專用：frame_jpeg 加上「鎖定目標」的框（洋紅）。送給 LLM 的 /frame.jpg 不受影響。"""
-        jpg = self.frame_jpeg(width=width)
+        jpg = self._draw_cam_lock(self.frame_jpeg(width=width))
         tgt = getattr(self, "_nav_target", None)
         if jpg is None or tgt is None or cv2 is None:
             return jpg
@@ -886,6 +949,317 @@ class RoboMasterBackend(object):
         except Exception as e:
             print("[server] frame_live 畫框失敗：%s" % e)
             return jpg
+
+    # ---- explore 模式：陌生環境，實體自己建圖（2026-11-12）----
+    # 鏡射模式一個字都沒改：地圖從場景俯視相機來的那條路（_start_nav）只在 sim 跑；這裡是第二種地圖來源，
+    # 只在 --explore 時啟動，之後 navigate_to / return_to_origin 直接沿用同一套 NavMap 規劃與閉迴路執行。
+    def _odom_pose(self):
+        """實體里程計 → 世界姿態 (x, y, heading_deg)。
+        SDK 的 position_m：原點 = 訂閱那一刻的位置，但座標軸是「開機時的車頭」（yaw=0 的方向）為 x、右為 y，不是連線時的車頭
+        （2026-11-12 實測：車被搬過、連線時 yaw=+101°，沒轉這個角度的話地圖以為它往前右走、實際往左後繞，跑出探索範圍、差點出門）。
+        yaw 順時針為正。世界座標 = 連線時的車頭為 +x、左為 +y、逆時針為正：先把位置繞 origin_yaw 轉到連線時的車頭座標系，再把 y 反號。"""
+        st = self.state()
+        pos, yaw = st.get("position_m"), st.get("yaw_deg")
+        if not pos or yaw is None:
+            return None
+        origin = self._origin_yaw or 0.0
+        c, s_ = math.cos(math.radians(origin)), math.sin(math.radians(origin))
+        x, yr = float(pos["x"]), float(pos["y"])
+        xf = x * c + yr * s_          # 沿連線時車頭方向的分量
+        yr_f = -x * s_ + yr * c       # 連線時車頭座標系裡的「右」分量
+        ox, oy = getattr(self, "_odom_offset", (0.0, 0.0))   # scan_around 量到的打滑量（原地轉一圈應該回到同一點）
+        return xf + ox, -yr_f + oy, _wrap_deg(-(float(yaw) - origin))
+
+    def _start_tof_map(self):
+        self._nav = None
+        self._nav_sim = None
+        self._nav_last_path = None
+        self._nav_last_goal = None
+        self._nav_target = None
+        self._nav_lock = threading.Lock()
+        if TofMap is None:
+            print("[server] explore：載不到 nav_map，無法建圖")
+            return
+        off = float(os.environ.get("ROBOT_TOF_OFFSET_M", "0.16"))
+        self._nav = TofMap(sensor_offset_m=off)
+        # 相機地板邊界測距：一張畫面幾百筆距離，刻度用每一停的 ToF 自動校正（cam_floor.py）
+        self._floor = FloorRanger() if (FloorRanger is not None and cv2 is not None) else None
+        self._floor_dbg_jpg = None
+        if self._floor is not None:
+            print("[server] explore：相機地板邊界測距 %s（校正檔 %s）" % ("已有校正" if self._floor.params else "等第一圈掃描校正", self._floor.calib_path))
+        b = os.environ.get("ROBOT_EXPLORE_BOUNDS", "").strip()   # "xmin,xmax,ymin,ymax"（世界座標，原點 = 出發點、+y = 出發時的左邊）
+        if b:
+            try:
+                self._nav.set_bounds(*[float(v) for v in b.split(",")])
+                print("[server] explore 範圍：x %.1f..%.1f, y %.1f..%.1f（外面當牆）" % self._nav.bounds)
+            except Exception as e:
+                print("[server] ROBOT_EXPLORE_BOUNDS 格式錯（%s）：要 xmin,xmax,ymin,ymax" % e)
+        self._home_world = None
+        for _ in range(30):   # 等第一筆里程計
+            self._home_world = self._odom_pose()
+            if self._home_world:
+                break
+            time.sleep(0.1)
+        print("[server] explore 模式：地圖從零開始，由前向 ToF（離中心 %.2f m）+ 里程計邊走邊填；出發點 %s（GET /map.png、/map.json）"
+              % (off, "(%.2f, %.2f) 朝向 %.0f°" % self._home_world if self._home_world else "還沒讀到里程計"))
+        threading.Thread(target=self._poll_tof_map, daemon=True, name="tof-map").start()
+
+    def _poll_world_pose(self):
+        """10 Hz：里程計 → world_xy / world_heading_deg，實體模式不建圖時用（explore 模式由 _poll_tof_map 一起做）。"""
+        while True:
+            try:
+                pose = self._odom_pose()
+                if pose:
+                    self._set("world_xy", [round(pose[0], 3), round(pose[1], 3)])
+                    self._set("world_heading_deg", round(pose[2], 1))
+            except Exception as e:
+                print("[server] 里程計輪詢失敗：%s" % e)
+            time.sleep(0.1)
+
+    def _poll_tof_map(self):
+        """10 Hz：里程計 → world_xy / world_heading_deg（/live、/map.png 用），ToF 讀值填進地圖。
+        轉動中不填（0.1 s 內轉超過 3° 就跳過）：ToF 5 Hz、yaw 20 Hz，轉動時一筆讀值可能已經偏了十幾度。"""
+        last_hd = None
+        while True:
+            try:
+                pose = self._odom_pose()
+                if pose:
+                    self._set("world_xy", [round(pose[0], 3), round(pose[1], 3)])
+                    self._set("world_heading_deg", round(pose[2], 1))
+                    if self._home_world is None:
+                        self._home_world = pose
+                    turning = last_hd is not None and abs(_wrap_deg(pose[2] - last_hd)) > 3.0
+                    last_hd = pose[2]
+                    tof, tof_m = self._tof_front()
+                    with self._nav_lock:
+                        self._nav.clear_footprint(pose[0], pose[1])   # 車身所在的格子一定是空的
+                    if not turning and tof is not None and not getattr(self, "_scan_active", False):
+                        with self._nav_lock:
+                            self._nav.integrate(pose, tof_m)
+            except Exception as e:
+                print("[server] explore 建圖輪詢失敗：%s" % e)
+            time.sleep(0.1)
+
+    def _explore_only(self):
+        if getattr(self, "_nav", None) is None or getattr(self, "_nav_sim", None) is not None:
+            return {"ok": False, "message": "only available in explore mode (server started with --explore on the real robot)"}
+        return None
+
+    def _act_scan_around(self, p):
+        """原地轉一圈，每 step_deg 停一下讀 ToF 填地圖：一顆 20° 的前向 ToF 這樣就變成一台慢的一維 LiDAR。"""
+        err = self._explore_only()
+        if err:
+            return err
+        step = max(5.0, min(45.0, float(p.get("step_deg") or 15.0)))
+        n = int(round(360.0 / step))
+        pose0 = self._nav_pose()
+        if pose0 is None:
+            return {"ok": False, "message": "cannot read odometry"}
+        readings = []
+        samples = []    # (pose, tof_m)：先收集，轉回原朝向量到打滑量之後再用修正過的位姿填圖
+        frames = []     # (sample index, 640 寬的畫面)：相機地板邊界測距用
+        thumbs = []     # 每一停拍一張（使用者 2026-11-12：「順便用相機畫圖」）：拼成環景放在 /scan.jpg，agent 之後可以看
+        fails = 0
+        t0 = time.time()
+        self._scan_active = True
+        for i in range(n):
+            time.sleep(0.25)   # ToF 5 Hz：停穩後等一筆新的
+            pose = self._nav_pose() or pose
+            tof, tof_m = self._tof_front()
+            samples.append((pose, tof_m))
+            readings.append((pose[2], tof_m))
+            if getattr(self, "_camera_ok", False) and cv2 is not None:
+                try:
+                    jpg = self.frame_jpeg(width=640, quality=85)
+                    img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR) if jpg else None
+                except Exception:
+                    img = None
+                thumbs.append((pose[2], tof_m, img))
+                frames.append((len(samples) - 1, img))   # 跟 samples 同索引：之後用修正過的位姿填相機射線
+            if i == n - 1:
+                break
+            r = self.do("move_chassis", {"forward_m": 0, "right_m": 0, "turn_left_deg": step, "z_speed": 40})   # 轉慢一點少打滑（預設 70°/s）
+            if not r.get("ok"):
+                fails += 1
+                if fails >= 2:
+                    self.stop()
+                    break
+        log = []
+        pose = self._nav_pose() or pose0
+        self._turn_to(pose0[2], pose, log, tol=4.0)   # 轉回開始時的朝向（里程計的 yaw 會漂一點）
+        pose = self._nav_pose() or pose
+        # 原地轉一圈應該回到同一點：位置差就是麥克納姆輪打滑（實測每圈 8–10 cm，五個停點就差半公尺、牆會重影）。
+        # 把它扣回里程計（之後的位姿都套這個偏移），這一圈的讀值則假設打滑是線性累積、按比例修正後才填圖。
+        dx, dy = pose[0] - pose0[0], pose[1] - pose0[1]
+        drift = math.hypot(dx, dy)
+        if drift <= 0.30:
+            ox, oy = getattr(self, "_odom_offset", (0.0, 0.0))
+            self._odom_offset = (ox - dx, oy - dy)
+            pose = (pose0[0], pose0[1], pose[2])
+        else:
+            dx = dy = 0.0   # 差太多不像打滑（可能真的被推走了），不補
+        with self._nav_lock:
+            for k, (ps, d) in enumerate(samples):
+                f = k / float(max(1, len(samples) - 1))
+                self._nav.integrate((ps[0] - dx * f, ps[1] - dy * f, ps[2]), d)
+        cam_note = self._scan_camera_rays(samples, frames, dx, dy)
+        self._scan_active = False
+        # 以目前朝向為準，每 45° 一個扇區報最近的障礙
+        sectors = {}
+        for hd, d in readings:
+            rel = _wrap_deg(hd - pose[2])
+            k = int(round(rel / 45.0)) * 45
+            k = -180 if k == 180 else k
+            if d is not None and (k not in sectors or d < sectors[k]):
+                sectors[k] = d
+        parts = []
+        for k in (0, 45, 90, 135, -180, -135, -90, -45):
+            parts.append("%+d°: %s" % (k, ("%.2f m" % sectors[k]) if k in sectors else "clear >%.0f m" % self._nav.max_range_m))
+        nearest = min(((d, hd) for hd, d in readings if d is not None), default=None)
+        pano = self._scan_panorama(thumbs, pose[2])
+        msg = ("scan_around: %d readings in %.0fs%s (odometry slip during the spin %.2f m, compensated); obstacles by direction (turn_left from current heading): %s; map now %d occupied cells, %d known%s"
+               % (len(readings), time.time() - t0, (" (%d turns failed)" % fails) if fails else "", drift, ", ".join(parts),
+                  int(self._nav.dynamic.sum()), int(self._nav.known.sum()),
+                  ("; camera panorama of this scan at /scan.jpg (one tile per stop, labelled with turn_left and distance)" if pano else "") + cam_note))
+        if nearest:
+            msg += "; nearest %.2f m at turn_left %+.0f°" % (nearest[0], _wrap_deg(nearest[1] - pose[2]))
+        return {"ok": fails < 2, "message": msg, "sectors": {str(k): round(v, 2) for k, v in sectors.items()},
+                "heading_deg": round(pose[2], 1)}
+
+    def _scan_camera_rays(self, samples, frames, dx, dy):
+        """相機地板邊界 → 地圖。每一停：畫面中央欄的邊界列 + ToF 距離（從車身中心算）當校正配對；校正好了就把整張畫面的
+        輪廓（±28°、幾百筆）當射線填進地圖，命中只加 1 分（兩個停點都看到才算障礙）。回傳給 message 的短註記。"""
+        fl = getattr(self, "_floor", None)
+        if fl is None or not frames:
+            return ""
+        n_pairs0 = len(fl.pairs)
+        for k, img in frames:
+            if img is None:
+                continue
+            ps, d = samples[k]
+            try:
+                row = fl.centre_edge_row(img)
+            except Exception:
+                row = None
+            if row is not None and d is not None:
+                fl.add_pair(row, d + self._nav.sensor_offset_m)   # ToF 在車頭前緣：換成從車身中心算
+        if fl.params is None:
+            return "; camera ranging: calibrating (%d/6 pairs)" % len(fl.pairs)
+        n_rays = 0
+        total = len(samples)
+        with self._nav_lock:
+            for k, img in frames:
+                if img is None:
+                    continue
+                ps, _ = samples[k]
+                f = k / float(max(1, total - 1))
+                pose = (ps[0] - dx * f, ps[1] - dy * f, ps[2])
+                try:
+                    prof = fl.profile(img)
+                except Exception as e:
+                    print("[server] 相機測距失敗：%s" % e)
+                    continue
+                rays = [(math.degrees(math.atan2(lat, fwd)), math.hypot(fwd, lat)) for _b, fwd, lat in prof]
+                n_rays += len(rays)
+                self._nav.integrate_rays(pose, rays, hit_inc=1, free_dec=1)
+        try:
+            mid = frames[len(frames) // 2][1]
+            if mid is not None:
+                ok, buf = cv2.imencode(".jpg", fl.debug_image(mid), [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if ok:
+                    self._floor_dbg_jpg = buf.tobytes()
+        except Exception:
+            pass
+        return "; camera ranging: %d floor-edge rays added (calibration %d pairs, rms %.2f m)" % (
+            n_rays, len(fl.pairs), getattr(fl, "rms_m", float("nan")))
+
+    def _scan_panorama(self, thumbs, heading_now):
+        """掃描時每一停的相機畫面拼成一張：6 欄、每格標「相對目前朝向要左轉幾度」跟 ToF 距離。存在 self._scan_pano_jpg，GET /scan.jpg。"""
+        tiles = [(hd, d, im) for hd, d, im in thumbs if im is not None]
+        if not tiles or cv2 is None:
+            return None
+        tiles.sort(key=lambda t: _wrap_deg(t[0] - heading_now))
+        tw, th = 240, 135
+        cols = 6
+        rows = (len(tiles) + cols - 1) // cols
+        canvas = np.full((rows * (th + 18), cols * tw, 3), 30, dtype=np.uint8)
+        for k, (hd, d, im) in enumerate(tiles):
+            r, c = divmod(k, cols)
+            y0, x0 = r * (th + 18), c * tw
+            canvas[y0 + 18:y0 + 18 + th, x0:x0 + tw] = cv2.resize(im, (tw, th))
+            label = "turn %+.0f  %s" % (_wrap_deg(hd - heading_now), ("%.2f m" % d) if d is not None else "clear")
+            cv2.putText(canvas, label, (x0 + 4, y0 + 13), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        ok, buf = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            return None
+        self._scan_pano_jpg = buf.tobytes()
+        return self._scan_pano_jpg
+
+    def _act_set_bounds(self, p):
+        """只改探索範圍、不動車（run_explore.sh 沿用已在跑的 server 時用）。"""
+        err = self._explore_only()
+        if err:
+            return err
+        try:
+            with self._nav_lock:
+                self._nav.set_bounds(*[float(v) for v in p["bounds"]])
+        except Exception as e:
+            return {"ok": False, "message": "bounds must be [xmin, xmax, ymin, ymax] in world metres (%s)" % e}
+        return {"ok": True, "message": "explore bounds set: x %.1f..%.1f y %.1f..%.1f (outside is treated as wall)" % self._nav.bounds}
+
+    def _act_explore(self, p):
+        err = self._explore_only()
+        if err:
+            return err
+        steps = max(1, min(5, int(p.get("steps") or 1)))
+        notes = []
+        # detail=true：只有 1 m 內才算看過、每 10° 停一次掃（使用者 2026-11-12：「還要再詳細探索」）；預設 1.5 m / 15°
+        detail = bool(p.get("detail"))
+        self._nav.known_range_m = float(p.get("known_range_m") or (1.0 if detail else 1.5))
+        scan_step = float(p.get("scan_step_deg") or (10.0 if detail else 15.0))
+        if p.get("bounds"):
+            try:
+                with self._nav_lock:
+                    self._nav.set_bounds(*[float(v) for v in p["bounds"]])
+                notes.append("bounds x %.1f..%.1f y %.1f..%.1f" % self._nav.bounds)
+            except Exception as e:
+                return {"ok": False, "message": "bounds must be [xmin, xmax, ymin, ymax] in world metres (%s)" % e}
+        for i in range(steps):
+            pose = self._nav_pose()
+            if pose is None:
+                return {"ok": False, "message": "cannot read odometry"}
+            if self._nav.known.sum() < 50:
+                r = self._act_scan_around({"step_deg": scan_step})   # 什麼都還沒掃：先轉一圈
+                notes.append("initial scan: %s" % ("ok" if r.get("ok") else str(r.get("message", ""))[:80]))
+                pose = self._nav_pose() or pose
+            with self._nav_lock:
+                goal = self._nav.frontier_goal((pose[0], pose[1]))
+            if goal is None:
+                notes.append("no frontier left")
+                return {"ok": True, "message": "explore: nothing left to explore within the map | " + "; ".join(notes)}
+            r = self._act_navigate_to({"x": goal[0], "y": goal[1], "tolerance_m": 0.15, "face": False, "label": "frontier"})
+            notes.append("frontier (%.2f, %.2f): %s" % (goal[0], goal[1], "reached" if r.get("ok") else str(r.get("message", ""))[:100]))
+            if not r.get("ok") and "no path" in str(r.get("message", "")):
+                # 會動的東西（人、椅子）：舊障礙把路封死時先重掃一圈更新地圖再試一次（使用者 2026-11-12：有些物件會移動）
+                self._act_scan_around({})
+                r = self._act_navigate_to({"x": goal[0], "y": goal[1], "tolerance_m": 0.15, "face": False, "label": "frontier"})
+                notes.append("after rescan: %s" % ("reached" if r.get("ok") else str(r.get("message", ""))[:80]))
+            r2 = self._act_scan_around({"step_deg": scan_step})
+            notes.append("scan: %s" % (str(r2.get("message", ""))[:160]))
+        self._nav_target = None
+        return {"ok": True, "message": "explore: %d step(s) | %s" % (steps, "; ".join(notes))}
+
+    def map_json(self):
+        if not getattr(self, "_nav", None) or not hasattr(self._nav, "export"):
+            return None
+        st = self.state()
+        with self._nav_lock:
+            d = self._nav.export()
+        d["robot"] = {"world_xy": st.get("world_xy"), "heading_deg": st.get("world_heading_deg")}
+        d["home"] = list(self._home_world) if getattr(self, "_home_world", None) else None
+        d["target"] = getattr(self, "_nav_target", None)
+        d["path"] = getattr(self, "_nav_last_path", None)
+        return d
 
     def map_png(self):
         if not getattr(self, "_nav", None):
@@ -969,6 +1343,8 @@ class RoboMasterBackend(object):
         self._nav_trajectory = [pose]  # 每個 primitive 之後的姿態，drive_through 用來判定有沒有真的穿過結構內部
         goal = target
         self._nav.refresh_dynamic()  # 目標物也算障礙：它的膨脹會把終點擋在合理距離外，排除它反而讓車撞上去（回歸測試 small_green）
+        for ob in list(self._real_obstacles):   # 實體 ToF 發現的（模擬裡的方塊是靜態的，refresh_dynamic 不會重新掃到）
+            self._nav.mark_blocked(ob[0], ob[1])
         if stop_m > 0:
             # 終點 = 目標往機器人這一側退 stop_m；退到的點還在障礙/膨脹層裡（長椅、收納箱、球池這種大結構的
             # 中心）就沿同一條線繼續往外推，直到第一個可走的格子，這樣「go_to 長椅」會停在長椅前緣。
@@ -1025,7 +1401,11 @@ class RoboMasterBackend(object):
                         cands.sort(key=lambda c: (self._nav.passage_axis_at(c[1], c[2]) is not None, c[3] % 90 != 0,
                                                   int(c[0] / 0.15), math.hypot(c[1] - pose[0], c[2] - pose[1])))
                     else:
-                        cands.sort(key=lambda c: (self._nav.passage_axis_at(c[1], c[2]) is not None, round(c[0], 2), c[3]))
+                        # 2026-11-14：只比距離時，斜 60° 的站位常因為近 5 cm 被選中，車停在箱子的斜角（朝向 58°），ToF 打到箱角、
+                        # 手臂也對不正。距離跟最近的差不到 15 cm 的都算「一樣近」，其中偏離直線最少的優先。
+                        best = min(c[0] for c in cands) if cands else 0.0
+                        cands.sort(key=lambda c: (self._nav.passage_axis_at(c[1], c[2]) is not None, c[0] > best + 0.15, c[3], round(c[0], 2)))
+                        print("[nav] 站位候選（退距, 偏角）：%s" % [(round(c[0], 2), c[3]) for c in cands[:6]])
                     return cands
                 cands = []
                 for sm in (stop_m, round(max(0.2, stop_m - 0.15), 2), round(max(0.2, stop_m - 0.25), 2)):
@@ -1159,7 +1539,7 @@ class RoboMasterBackend(object):
                         counters["dogleg"] = counters.get("dogleg", 0) + 1
                         if ok:
                             dl = min(room, abs(perp) / max(math.sin(math.radians(theta)), 0.05))
-                            r = self.do("move_chassis", {"forward_m": dl, "right_m": 0, "turn_left_deg": 0})
+                            r = self.do("move_chassis", {"near_ok": True, "forward_m": dl, "right_m": 0, "turn_left_deg": 0})
                             counters["prims"] += 1
                             print("[nav] passage centering: perp %+.2f m -> heading %+.0f°, fwd %.2f ok=%s" % (perp, cmd, dl, r.get("ok")))
                         continue
@@ -1185,7 +1565,7 @@ class RoboMasterBackend(object):
                     if counters["noprog"] > 3:
                         self.stop()
                         return result(False, "no progress inside the passage near (%.2f, %.2f)" % pose[:2])
-                r = self.do("move_chassis", {"forward_m": -step if reverse else step, "right_m": 0, "turn_left_deg": 0})
+                r = self.do("move_chassis", {"near_ok": True, "forward_m": -step if reverse else step, "right_m": 0, "turn_left_deg": 0})
                 counters["prims"] += 1
                 p_after = self._nav_pose()
                 if p_after is not None:
@@ -1225,7 +1605,7 @@ class RoboMasterBackend(object):
                         break
                 if nudge is not None:
                     counters["nudge"] = counters.get("nudge", 0) + 1
-                    r = self.do("move_chassis", {"forward_m": nudge, "right_m": 0, "turn_left_deg": 0})
+                    r = self.do("move_chassis", {"near_ok": True, "forward_m": nudge, "right_m": 0, "turn_left_deg": 0})
                     counters["prims"] += 1
                     print("[nav] no room to spin at (%.2f, %.2f) (clearance %.2f): moved %+.2f m along the heading first, ok=%s"
                           % (pose[0], pose[1], self._nav.clearance_at(pose[0], pose[1]), nudge, r.get("ok")))
@@ -1250,7 +1630,7 @@ class RoboMasterBackend(object):
                     log.append("turn %+.0f rejected (tof=%s), %s and retrying" % (delta, tof_now, "backing up" if touching else "waiting"))
                     print("[nav] turn %+.0f rejected at (%.2f, %.2f, %.0f°), touching=%s -> retry" % (delta, pose[0], pose[1], pose[2], touching))
                     if touching:
-                        self.do("move_chassis", {"forward_m": -0.2, "right_m": 0, "turn_left_deg": 0})
+                        self.do("move_chassis", {"near_ok": True, "forward_m": -0.2, "right_m": 0, "turn_left_deg": 0})
                         counters["prims"] += 1
                     continue
                 else:
@@ -1262,7 +1642,7 @@ class RoboMasterBackend(object):
             # 正確做法：讀值比這一步短就把步長縮到它前面 5 cm；只有東西已經貼到車頭（< 10 cm）才標障礙、重規劃。
             tof, tof_m = self._tof_front()
             if tof_m is not None and tof_m < step + 0.05:
-                if tof_m > 0.10:
+                if tof_m > 0.15:
                     step = max(0.05, tof_m - 0.05)
                 else:
                     self._nav_mark_blocked(pose, 0.16 + tof_m)
@@ -1271,10 +1651,21 @@ class RoboMasterBackend(object):
                         self.stop()
                         return result(False, why)
                     continue
-            r = self.do("move_chassis", {"forward_m": step, "right_m": 0, "turn_left_deg": 0})
+            r = self.do("move_chassis", {"near_ok": True, "forward_m": step, "right_m": 0, "turn_left_deg": 0})
             counters["prims"] += 1
             p_after = self._nav_pose()
             if p_after is not None:
+                moved = math.hypot(p_after[0] - pose[0], p_after[1] - pose[1])
+                counters["stall"] = counters.get("stall", 0) + 1 if moved < max(0.03, step * 0.3) else 0
+                if counters["stall"] >= 3:
+                    # 連三次「要走卻幾乎沒動」：頂著牆或東西（里程計也可能在打滑），標障礙、重規劃，不要一直推
+                    counters["stall"] = 0
+                    self._nav_mark_blocked(pose, 0.16 + (tof_m if tof_m is not None else 0.10))
+                    wps, why = replan("no progress for 3 moves (tof_front=%s mm)" % tof)
+                    if wps is None:
+                        self.stop()
+                        return result(False, why)
+                    continue
                 self._nav_trajectory.append(p_after)
                 print("[nav] fwd %.2f -> (%.2f, %.2f, %.0f°) ok=%s tof=%s" % (
                     step, p_after[0], p_after[1], p_after[2], r.get("ok"), self.state().get("tof_front_mm")))
@@ -1622,8 +2013,9 @@ class RoboMasterBackend(object):
                 freq=5, callback=lambda p: self._set("arm_mm", {"x": _fix_int32(p[0]), "y": _fix_int32(p[1])}))),
             ("gripper status", lambda: ep.gripper.sub_status(
                 freq=5, callback=lambda s: self._set("gripper", str(s)))),
+            # SDK 一次回 4 個插槽（最多 4 顆 ToF），模組編號不一定落在第 0 槽：取第一個非 0 的，沒有就是 0 = 沒認到
             ("distance sensor", lambda: ep.sensor.sub_distance(
-                freq=5, callback=lambda d: self._set("tof_distance_mm", int(d[0])))),
+                freq=5, callback=lambda d: self._set("tof_distance_mm", int(next((v for v in d if v), 0))))),
             ("battery", lambda: ep.battery.sub_battery_info(
                 freq=1, callback=lambda b: self._set("battery_percent", int(b)))),
         ]
@@ -1643,6 +2035,24 @@ class RoboMasterBackend(object):
         if self._prox_handles:
             # 這個模擬器的 SDK ToF 永遠回報 0，有真的 prox 讀值時就不要一起丟出去混淆。
             data.pop("tof_distance_mm", None)
+        else:
+            # 實體機：套裝附的紅外線深度感測器（ToF，0.1–10 m、視角 20°）接在車頭時，就是模擬裡 prox_front 的對應物。
+            # 導航/避障只看 tof_front_mm，這裡把 SDK 的 sub_distance 讀值對過去：0 = 沒接模組（SDK 偵測不到時回 0），
+            # 不給 tof_front_mm，導航照舊不用它；超過量程（SDK 回很大的值）跟模擬一樣記 9999 = 前面沒東西。
+            tof = data.get("tof_distance_mm")
+            if tof:
+                data["tof_front_mm"] = 9999 if tof >= 9999 else int(tof)
+        rs = self._mirror_real_state
+        if rs and self.mirror_real and time.time() - rs.get("t", 0) < 3.0:
+            rt = rs.get("tof_front_mm")
+            if rt is not None:
+                data["real_tof_front_mm"] = rt
+                st_ = data.get("tof_front_mm")
+                if rt != 9999 and (st_ is None or st_ == 9999 or rt < st_):
+                    data["tof_front_mm"] = int(rt)
+            for k in ("world_xy", "world_heading_deg", "battery_percent", "gripper_holding", "gripper_claw_deg", "arm_pose"):
+                if rs.get(k) is not None:
+                    data["real_" + k] = rs[k]
         data["mode"] = self.mode
         if self.nexarm is not None:
             data.pop("gripper_force_n", None)   # 舊手臂的腕部力感測器：手臂藏起來了還是會讀到固定值，會誤導 agent
@@ -1728,6 +2138,19 @@ class RoboMasterBackend(object):
     def frame_jpeg(self, width=640, quality=80, raw=False):
         if cv2 is None:
             return None
+        if self.mirror_real and self.mirror_camera and not raw:
+            try:
+                with urllib.request.urlopen(self.mirror_real.rstrip("/") + "/frame.jpg", timeout=8) as resp:
+                    if resp.headers.get("Content-Type", "").startswith("image/"):
+                        self._camera_fail_streak = 0
+                        self._camera_live_ok = True
+                        return resp.read()
+            except Exception as e:
+                # 不退回模擬畫面：灰方塊會被 agent 當成真實場地（2026-11-13 相機線換掉後串流起不來，寧可讓它知道沒畫面）
+                if time.time() - getattr(self, "_mirror_cam_warn", 0) > 10:
+                    self._mirror_cam_warn = time.time()
+                    print("[mirror] 實體前鏡頭讀不到（%s）：/frame.jpg 回 503，不用模擬畫面代替" % str(e)[:80])
+                return None
         if not raw:
             try:
                 img = self._sim_front_image()
@@ -1906,6 +2329,185 @@ class RoboMasterBackend(object):
     MIRROR_ACTIONS_DEFAULT = ("move_chassis", "move_arm", "arm_to", "gripper", "recenter_arm", "stop")
     mirror_real = None
     mirror_actions = MIRROR_ACTIONS_DEFAULT
+    # 2026-11-13（掃描場地、使用者放了箱子）：鏡射模式的感知也要用實體的——
+    #   mirror_camera：/frame.jpg 改拿實體 server 的前鏡頭（模擬場景只有灰方塊，視覺模型看不出「箱子」、「桌子」）
+    #   _mirror_real_state：背景每 0.2 s 抓一次實體 /state；tof_front_mm 取模擬與實體較近的那個，move_chassis 的防撞縮步、
+    #   navigate_to 的 ToF 重規劃、approach 的收尾全都因此看得到真實障礙
+    #   _real_obstacles：實體 ToF 看到、模擬地圖沒有的東西 → 模擬場景放一根橘色方塊 + 導航圖標占據（見 _poll_mirror_real）
+    mirror_camera = False
+    _mirror_real_state = None
+    _real_obstacles = []
+
+    def _start_mirror_feedback(self):
+        self._real_obstacles = []
+        threading.Thread(target=self._poll_mirror_real, daemon=True, name="mirror-feedback").start()
+
+    def _poll_mirror_real(self):
+        base = self.mirror_real.rstrip("/")
+        last_pose, still, gui_retry = None, 0, 0.0
+        self._fb_sims = {}
+        self._fb_lock = threading.Lock()   # zmq REQ socket 不能同時被兩個執行緒用（forget_real_obstacles 從 HTTP 執行緒拆方塊時曾把 server 整個 assert 掉）
+        while True:
+            time.sleep(0.2)
+            try:
+                with urllib.request.urlopen(base + "/state", timeout=2) as resp:
+                    rs = json.loads(resp.read().decode("utf-8"))
+                rs["t"] = time.time()
+                self._mirror_real_state = rs
+            except Exception:
+                continue
+            try:
+                rt = rs.get("tof_front_mm")
+                if rt is None or (rt != 9999 and rt < 100):
+                    continue
+                with self._tlock:
+                    sim_tof = self.telemetry.get("tof_front_mm")
+                    xy, hd = self.telemetry.get("world_xy"), self.telemetry.get("world_heading_deg")
+                if xy is None or hd is None:
+                    continue
+                # 只在車停著的時候標/消（里程計與俯視位姿在動的時候差一拍，標出來會偏）
+                pose = (float(xy[0]), float(xy[1]), float(hd))
+                if last_pose and math.hypot(pose[0] - last_pose[0], pose[1] - last_pose[1]) < 0.02 and abs(_wrap_deg(pose[2] - last_pose[2])) < 2.0:
+                    still += 1
+                else:
+                    still = 0
+                last_pose = pose
+                if still < 2:
+                    continue
+                sx = pose[0] + 0.16 * math.cos(math.radians(pose[2]))   # ToF 在車頭前緣
+                sy = pose[1] + 0.16 * math.sin(math.radians(pose[2]))
+                # (a) 假障礙會自己消：以前放的方塊落在 ToF 錐裡、而現在讀值比它遠得多（或沒東西）→ 箱子被搬走了
+                for ob in list(self._real_obstacles):
+                    dist = math.hypot(ob[0] - sx, ob[1] - sy)
+                    bearing = _wrap_deg(math.degrees(math.atan2(ob[1] - sy, ob[0] - sx)) - pose[2])
+                    if dist < 1.4 and abs(bearing) < 7.0 and (rt == 9999 or rt > dist * 1000 + 300):
+                        self._forget_real_obstacle(ob)
+                        print("[mirror] 實體 ToF 朝 (%.2f, %.2f) 看過去沒東西了（%s mm）→ 拆掉 real_obstacle_%03d" % (ob[0], ob[1], rt, ob[2]))
+                # (b) 看到地圖上沒有的東西 → 放方塊
+                # 2026-11-14：這顆 ToF 對矮箱子在 0.8 m 以外讀值亂跳（0.8–1.4 m/9999），一趟任務就在模擬裡留下 8 個假方塊，
+                # 導航被自己放的方塊擋住。只在 0.8 m 內（讀值穩定）才放方塊。
+                if rt == 9999 or rt > 800:
+                    continue
+                if sim_tof is not None and sim_tof != 9999 and sim_tof <= rt + 300:
+                    continue   # 模擬自己也看到差不多距離的東西：地圖已經有它
+                # 方塊邊長 0.12：中心再往前推半格，讓方塊的近面落在 ToF 打到的點上，模擬 ToF 才會讀到跟實體一樣的距離
+                # （2026-11-14 實測：中心放在打到點，模擬讀 185 mm、實體 282 mm，合併後的 tof_front_mm 少 10 cm，抓取時會誤判太近）
+                hx = sx + (rt / 1000.0 + 0.06) * math.cos(math.radians(pose[2]))
+                hy = sy + (rt / 1000.0 + 0.06) * math.sin(math.radians(pose[2]))
+                if any(math.hypot(hx - ob[0], hy - ob[1]) < 0.30 for ob in self._real_obstacles):   # 同一個箱子從不同面量到的點差 10-25 cm
+                    continue
+                self._real_obstacle_seq = getattr(self, "_real_obstacle_seq", 0) + 1
+                idx = self._real_obstacle_seq
+                self._real_obstacles.append((round(hx, 2), round(hy, 2), idx))
+                if getattr(self, "_nav", None) is not None:
+                    with getattr(self, "_nav_lock", threading.Lock()):
+                        self._nav.mark_blocked(hx, hy)
+                with self._fb_lock:
+                    for port in self._feedback_ports():
+                        sim = self._feedback_sim(port)
+                        if sim is None:
+                            continue
+                        try:
+                            self._spawn_real_obstacle(sim, idx, hx, hy)
+                        except Exception as e:
+                            print("[mirror] 模擬 %s 放方塊失敗：%s" % (port or 23000, str(e)[:80]))
+                            self._fb_sims.pop(port, None)
+                print("[mirror] 實體 ToF 在世界 (%.2f, %.2f) 看到地圖上沒有的東西（%d mm，模擬那邊 %s）→ 放了 real_obstacle_%03d、導航圖標占據"
+                      % (hx, hy, rt, sim_tof, idx))
+            except Exception as e:
+                print("[mirror] 實體 ToF 回饋失敗：%s" % e)
+
+    def _feedback_ports(self):
+        return [None, int(os.environ.get("ROBOT_MIRROR_GUI_PORT", "23001"))]   # None = 無視窗 23000（server 自己那個）
+
+    def _feedback_sim(self, port):
+        """回饋執行緒自己的 zmq 連線（不能碰 _nav_sim：REQ socket 不是執行緒安全的）。視窗版連不上就 30 秒後再試。"""
+        sims = self._fb_sims
+        ent = sims.get(port)
+        if ent is not None and ent[0] is not None:
+            return ent[0]
+        if ent is not None and time.time() < ent[1]:
+            return None
+        try:
+            if port is None:
+                sim = _new_sim_client(recv_timeout_s=5.0).require("sim")
+            else:
+                # 2026-11-15：視窗版 CoppeliaSim 沒開時，RemoteAPIClient(port) 會一直卡在連線，整條回饋執行緒停住，
+                # /state 從此沒有 real_* 欄位（實體 ToF、里程計都讀不到）。先用 0.3 秒的 TCP 探一下，沒開就跳過。
+                import socket as _sock
+                _sock.create_connection(("127.0.0.1", int(port)), timeout=0.3).close()
+                from coppeliasim_zmqremoteapi_client import RemoteAPIClient
+                import zmq
+                c = RemoteAPIClient(port=port)
+                c.socket.setsockopt(zmq.RCVTIMEO, 5000); c.socket.setsockopt(zmq.REQ_RELAXED, 1); c.socket.setsockopt(zmq.REQ_CORRELATE, 1)
+                sim = c.require("sim")
+            sims[port] = (sim, 0.0)
+            return sim
+        except Exception:
+            sims[port] = (None, time.time() + 30)
+            return None
+
+    def _forget_real_obstacle(self, ob):
+        try:
+            self._real_obstacles.remove(ob)
+        except ValueError:
+            return
+        if getattr(self, "_nav", None) is not None:
+            with getattr(self, "_nav_lock", threading.Lock()):
+                try:
+                    self._nav.unmark(ob[0], ob[1])
+                except Exception as e:
+                    print("[mirror] 導航圖清格失敗：%s" % e)
+        with getattr(self, "_fb_lock", threading.Lock()):
+            for port in self._feedback_ports():
+                sim = self._feedback_sim(port)
+                if sim is None:
+                    continue
+                try:
+                    sim.removeObjects([sim.getObject("/real_obstacles/real_obstacle_%03d" % ob[2])])
+                except Exception:
+                    pass
+
+    def _act_forget_real_obstacles(self, p):
+        """把實體 ToF 放的方塊全部拆掉（箱子被搬走、或新一回合開始）。"""
+        n = len(self._real_obstacles)
+        for ob in list(self._real_obstacles):
+            self._forget_real_obstacle(ob)
+        # 2026-11-16：server 重開之後清單是空的，但視窗版（23001）不會跟著重載場景，前幾輪放的方塊就一直留在畫面上
+        # （使用者：「還是有阿？」——無視窗那台已經沒有，視窗版還有 4 根）。這裡把兩台裡所有 real_obstacle_* 都掃掉，不只清單裡的。
+        stale = 0
+        with getattr(self, "_fb_lock", threading.Lock()):
+            for port in self._feedback_ports():
+                sim = self._feedback_sim(port)
+                if sim is None:
+                    continue
+                try:
+                    hs = [o for o in sim.getObjectsInTree(sim.handle_scene, sim.handle_all, 0)
+                          if sim.getObjectAlias(o).startswith("real_obstacle_")]
+                    if hs:
+                        sim.removeObjects(hs)
+                        stale += len(hs)
+                except Exception as e:
+                    print("[mirror] 掃舊方塊失敗（port %s）：%s" % (port, e))
+        return {"ok": True, "message": "forgot %d obstacle(s) found by the real distance sensor%s" % (n, (" (+%d stale block(s) removed from the simulators)" % stale) if stale else "")}
+
+    @staticmethod
+    def _spawn_real_obstacle(sim, idx, x, y):
+        try:
+            grp = sim.getObject("/real_obstacles")
+        except Exception:
+            grp = sim.createDummy(0.01)
+            sim.setObjectAlias(grp, "real_obstacles")
+        h = sim.createPrimitiveShape(sim.primitiveshape_cuboid, [0.12, 0.12, 0.30], 0)
+        sim.setObjectAlias(h, "real_obstacle_%03d" % idx)
+        sim.setObjectInt32Param(h, sim.shapeintparam_static, 1)
+        # 2026-11-15：不設成會碰撞的實體。方塊只是給地圖和模擬 ToF 看的記號；設成 respondable 時模擬車（手臂伸出去）貼著它轉身會被卡死，
+        # 之後每個前進指令模擬都走 0、實體走了又被「補送」拉回來，原地來回晃十幾次（回原點 17 步沒離開 (1.20,-0.02)）。
+        sim.setObjectInt32Param(h, sim.shapeintparam_respondable, 0)
+        sim.setShapeColor(h, None, sim.colorcomponent_ambient_diffuse, [1.0, 0.5, 0.1])
+        sim.setObjectParent(h, grp, True)
+        sim.setObjectPosition(h, -1, [x, y, 0.15])
+        return h
 
     def _mirror_post(self, name, p):
         """把一個動作送到實體 server，傳輸層失敗（手臂 USB 瞬斷等）會等 2 秒重送，最多 3 次。回 dict。"""
@@ -1938,7 +2540,7 @@ class RoboMasterBackend(object):
         p = dict(params or {})
         if name == "move_chassis":
             p = {"forward_m": float(p.get("forward_m") or 0), "right_m": float(p.get("right_m") or 0),
-                 "turn_left_deg": float(p.get("turn_left_deg") or 0)}
+                 "turn_left_deg": float(p.get("turn_left_deg") or 0), "push": bool(p.get("push"))}
         holder = {}
         th = threading.Thread(target=lambda: holder.__setitem__("real", self._mirror_post(name, p)), daemon=True)
         t0 = time.time()
@@ -1954,12 +2556,16 @@ class RoboMasterBackend(object):
             m = result.get("measured") or {}
             fix = {"forward_m": 0.0, "right_m": 0.0, "turn_left_deg": 0.0}
             dist = m.get("distance_m")
+            # 實體自己也可能沒走完（它的 ToF 避障先停）：補的量 = 模擬走的 − 實體實際走的，不是 − 指令。
+            # 2026-11-14：模擬被擋 0.00、實體走 0.05，舊算法補 −0.08，實體反而多退 3 cm
+            rdist = (real.get("measured") or {}).get("distance_m")
             if dist is not None:
                 for k in ("forward_m", "right_m"):
                     if abs(p[k]) > 0.01:
                         done = math.copysign(min(dist, abs(p[k])), p[k])
-                        if abs(p[k] - done) > 0.05:
-                            fix[k] = round(done - p[k], 3)
+                        rdone = math.copysign(min(float(rdist), abs(p[k])), p[k]) if rdist is not None else p[k]
+                        if abs(rdone - done) > 0.05 or (rdist is None and abs(p[k] - done) > 0.05):
+                            fix[k] = round(done - rdone, 3)
             if m.get("dyaw_deg") is not None and abs(p["turn_left_deg"]) > 0.5:
                 done = math.copysign(min(abs(float(m["dyaw_deg"])), abs(p["turn_left_deg"])), p["turn_left_deg"])
                 if abs(p["turn_left_deg"] - done) > 5.0:
@@ -2086,12 +2692,51 @@ class RoboMasterBackend(object):
             # 前方距離感測器看得到東西而且比這一步還近：只走到它前面 0.15 m。LLM 想推東西（推泡棉樑的任務）
             # 要明講 push=true。中等批次 m02 就是硬開 0.8 m 出隧道口，把泡棉樑推走後卡死在樑/球桶/長椅之間。
             tof, tof_m = self._tof_front()
+            # 鏡射實體時以實體 ToF 為準（2026-11-14 18:05）：模擬裡的障礙是之前 ToF 打到點放的方塊，車跟模擬漂開 20–30 cm 後方塊位置就是錯的，
+            # 模擬 ToF 以為前面 0.15 m 有東西、整步被砍成 0，實體其實還有 36 cm（pick_from_top 貼近 0.21 m 完全沒動）。會撞的是實體，聽實體的。
+            rs = getattr(self, "_mirror_real_state", None)
+            if rs and self.mirror_real and time.time() - rs.get("t", 0) < 3.0 and rs.get("tof_front_mm") is not None:
+                rt = rs["tof_front_mm"]
+                tof_m = None if rt >= 9999 else rt / 1000.0
             if tof_m is not None and tof_m < fwd + 0.15:
                 capped = max(0.0, round(tof_m - 0.15, 2))
                 guard_note = (" | front sensor sees something %.2f m ahead: drove %.2f m instead of the requested %.2f m to stay "
                               "0.15 m clear of it (pass push=true only if you really mean to push it)" % (tof_m, capped, fwd))
                 fwd = capped
                 p["forward_m"] = capped  # do() 的里程計比對也用縮短後的距離，不然會被判成「幾乎沒動＝被擋住」
+        # near_ok=True：技能「故意」靠近某個東西（抓取、對白點）時用。要抓的東西本身在地圖上就是障礙（實體 ToF 放的方塊 + 膨脹 0.22 m），
+        # 不跳過的話每一步都被截成 0——2026-11-15 下午地板抓取試了六七次都「差幾公分/走不到」，log 裡有 66 次 MAP 截短，就是這個。
+        # near_ok 只跳過地圖檢查，車頭 ToF 防撞照舊；LLM 自己下的 move_chassis 不會帶這個旗標。
+        # 2026-11-15 晚：只在鏡射/實體生效。純模擬（playground）原本的技能會故意貼近桶子、桌子，導航在窄處也用 0.15 m 餘裕規劃，
+        # 這層 0.22 m 的檢查把它們的步伐截成 0（p01 三次導航都「no progress」）。導航自己的步伐另外帶 near_ok。
+        map_guard = self.mode != "sim" or bool(self.mirror_real)
+        if map_guard and not p.get("push") and not p.get("near_ok") and getattr(self, "_nav", None) is not None and (abs(fwd) > 0.05 or abs(right) > 0.05):
+            # 地圖防撞（2026-11-14 使用者：「你沒有抓好機器人的大小，你撞到東西了」）：LLM 直接下的 move_chassis 以前只靠車頭那顆
+            # ToF（窄、低，桌腳椅腳掃不到），完全不查地圖也不管車身寬度；navigate_to 才有。這裡沿著要走的直線每 5 cm 查一次
+            # 膨脹後的占據格（車身半徑 0.22 m），碰到就只走到它前面一格。起點已經在膨脹層裡（貼著東西）就不擋，讓它退得出來。
+            try:
+                pose = self._nav_pose()
+                if pose:
+                    h = math.radians(pose[2])
+                    dist = math.hypot(fwd, right)
+                    ux = (fwd * math.cos(h) + right * math.sin(h)) / dist
+                    uy = (fwd * math.sin(h) - right * math.cos(h)) / dist
+                    if self._nav.is_free(*world_to_cell(pose[0], pose[1])):
+                        ok_d, t = dist, 0.05
+                        while t <= dist + 1e-6:
+                            if not self._nav.is_free(*world_to_cell(pose[0] + ux * t, pose[1] + uy * t)):
+                                ok_d = max(0.0, t - 0.05)
+                                break
+                            t += 0.05
+                        if ok_d < dist - 1e-6:
+                            k = ok_d / dist
+                            guard_note += (" | MAP: the straight line runs into an obstacle zone (walls/furniture plus the robot's "
+                                           "half-width) after %.2f m: drove %.2f m instead of %.2f m. Use navigate_to / go_to to get "
+                                           "around it instead of pushing on with move_chassis." % (ok_d, ok_d, dist))
+                            fwd, right = round(fwd * k, 3), round(right * k, 3)
+                            p["forward_m"], p["right_m"] = fwd, right
+            except Exception as e:
+                print("[server] move_chassis 地圖防撞檢查失敗（照舊執行）：%s" % e)
         v, w = LIMITS["xy_speed"], LIMITS["z_speed"]
         # 調速用：單次指定速度（測實體穩定上限時不用重啟），夾在 0.1–1.0 m/s、10–120 deg/s
         if p.get("xy_speed"):
@@ -2391,6 +3036,14 @@ class RoboMasterBackend(object):
                                + "Ranges are for the CURRENT gripper pitch: y_mm_here is the height range at "
                                "this forward reach, x_mm_here the forward range at this height. Pointing the gripper down "
                                "(arm_to pitch_deg -90) reaches much lower; horizontal (0) reaches higher.")
+                if NEX_MAX_Z_MM > 0:
+                    # 相機排線的硬上限也反映在遙測裡，agent 才不會規劃 380 mm 然後被夾
+                    yr = lim.get("y_mm_here")
+                    if yr and yr[1] > NEX_MAX_Z_MM:
+                        lim["y_mm_here"] = [yr[0], int(NEX_MAX_Z_MM)]
+                    if lim.get("can_raise_mm") is not None:
+                        lim["can_raise_mm"] = int(max(0, min(lim["can_raise_mm"], NEX_MAX_Z_MM - st["z"])))
+                    lim["note"] += " HARD LIMIT: height (y_mm) never above %.0f mm, the gripper camera cable is short." % NEX_MAX_Z_MM
                 self.telemetry["arm_limits"] = lim
             if getattr(self, "_origin_yaw", None) is not None:
                 self.telemetry["origin_yaw_deg"] = self._origin_yaw   # 連線時的朝向：return_to_origin 的 0 度、里程計 x 軸
@@ -2428,6 +3081,13 @@ class RoboMasterBackend(object):
         from nexarm import yaw_of
         dx = _clamp(p.get("forward_mm", 0), LIMITS["arm_mm"])
         dz = _clamp(p.get("up_mm", 0), LIMITS["arm_mm"])
+        cap_note = ""
+        cur, _age = self.nexarm.status()
+        if NEX_MAX_Z_MM > 0 and dz > 0 and cur and cur.get("z") is not None and cur["z"] + dz > NEX_MAX_Z_MM:
+            dz_new = max(0.0, NEX_MAX_Z_MM - float(cur["z"]))
+            cap_note = (" | up_mm capped %+.0f->%+.0f: the arm may not go above %.0f mm (gripper camera cable is short)"
+                        % (dz, dz_new, NEX_MAX_Z_MM))
+            dz = dz_new
         dyaw = _clamp(p.get("turn_left_deg", 0) or 0, 180.0)
         droll = _clamp(p.get("roll_deg", 0) or 0, 180.0)
         r = self.nexarm.move_by(dx=dx, dz=dz, dyaw=dyaw, droll=droll)
@@ -2456,12 +3116,17 @@ class RoboMasterBackend(object):
                 note += " | wrist rolled %+.0f deg of the requested %+.0f" % (mroll, droll)
             out["ok"] = out["ok"] and ok
             out["message"] += note
+        out["message"] += cap_note
         return out
 
     def _nex_arm_to(self, p):
         from nexarm import HOME, rotate_xy
         reach = float(p.get("x_mm", HOME[0]))
         z = float(p.get("y_mm", HOME[2]))
+        cap_note = ""
+        if NEX_MAX_Z_MM > 0 and z > NEX_MAX_Z_MM:
+            cap_note = " | height capped %.0f->%.0f mm: the gripper camera cable is short, the arm must stay low" % (z, NEX_MAX_Z_MM)
+            z = NEX_MAX_Z_MM
         pitch = p.get("pitch_deg")
         yaw = float(p.get("yaw_deg") or 0.0)
         roll = p.get("roll_deg")
@@ -2473,7 +3138,9 @@ class RoboMasterBackend(object):
             what += " base yaw=%.0f deg" % yaw
         if roll is not None:
             what += " wrist roll=%.0f deg" % float(roll)
-        return self._nex_result(r, what)
+        out = self._nex_result(r, what)
+        out["message"] += cap_note
+        return out
 
     def _nex_recenter_arm(self, p):
         if (p or {}).get("pose") == "stow":
@@ -2542,8 +3209,8 @@ class RoboMasterBackend(object):
         最後回報殘差；里程計會累積誤差，殘差超過 0.3 m 會 ok=False 讓批次 log 看得到。"""
         tol_m = float(p.get("tol_m", 0.08))
         tol_deg = float(p.get("tol_deg", 6.0))
-        if self.mode == "sim" and getattr(self, "_nav", None) and getattr(self, "_home_world", None):
-            return self._sim_return_home(tol_m, tol_deg)
+        if getattr(self, "_nav", None) and getattr(self, "_home_world", None):
+            return self._sim_return_home(tol_m, tol_deg)   # sim 跟 explore 都有地圖：繞障礙走回去
         notes = []
         origin = self._origin_yaw or 0.0
 
@@ -2600,8 +3267,18 @@ class RoboMasterBackend(object):
         resid = math.hypot(hx - pose[0], hy - pose[1])
         dh = (hh - pose[2] + 180) % 360 - 180
         ok = resid <= 0.3
-        return {"ok": ok, "message": "return_to_origin: %s, residual %.2f m, heading %+.0f deg from start (world pose) | %s"
-                                     % ("back at the start" if ok else "did NOT reach the start", resid, -dh, "; ".join(notes)),
+        real_note = ""
+        if self.mirror_real and (abs(hx) + abs(hy) + abs(hh)) < 1e-6:
+            # 2026-11-14 使用者：「你現在又不會回到原位了」——模擬回到原點，但實體每一步跟模擬差一點，連跑幾趟累積 30 cm / 10°。
+            # 實體 server 的里程計原點就是使用者擺車的地方：模擬走完之後，叫實體用它自己的里程計再歸位一次（只動實體，不鏡射回模擬）。
+            try:
+                rr = self._mirror_post("return_to_origin", {"tol_m": 0.04, "tol_deg": 3.0})
+                real_note = " | real robot then homed on its own odometry: %s" % str(rr.get("message", ""))[:160]
+                print("[mirror] 實體里程計歸位 -> %s %s" % ("ok" if rr.get("ok") else "FAIL", str(rr.get("message", ""))[:160]))
+            except Exception as e:
+                real_note = " | real odometry homing failed: %s" % str(e)[:80]
+        return {"ok": ok, "message": "return_to_origin: %s, residual %.2f m, heading %+.0f deg from start (world pose) | %s%s"
+                                     % ("back at the start" if ok else "did NOT reach the start", resid, -dh, "; ".join(notes), real_note),
                 "residual_m": round(resid, 3), "yaw_deg": round(-dh, 1)}
 
     def _act_stop(self, p):
@@ -3001,6 +3678,21 @@ def make_handler(backend, token):
             if path == "/live":
                 # 即時儀表板：占據格地圖、俯視圖、前相機每秒重抓一次，遙測一起顯示（純 HTML+JS，不用額外套件）
                 return self._send(200, LIVE_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            if path == "/floor.jpg":
+                jpg = getattr(backend, "_floor_dbg_jpg", None)
+                if not jpg:
+                    return self._send(503, {"ok": False, "message": "no floor-edge debug image yet"})
+                return self._send(200, jpg, "image/jpeg")
+            if path == "/scan.jpg":
+                jpg = getattr(backend, "_scan_pano_jpg", None)
+                if not jpg:
+                    return self._send(503, {"ok": False, "message": "no scan panorama yet (run scan_around in explore mode)"})
+                return self._send(200, jpg, "image/jpeg")
+            if path == "/map.json":
+                d = backend.map_json() if hasattr(backend, "map_json") else None
+                if d is None:
+                    return self._send(503, {"ok": False, "message": "no occupancy map (explore mode only)"})
+                return self._send(200, d)
             if path == "/map.png":
                 png = backend.map_png() if hasattr(backend, "map_png") else None
                 if png is None:
@@ -3016,6 +3708,15 @@ def make_handler(backend, token):
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                     agent_event(json.loads(self.rfile.read(n).decode("utf-8") or "{}"))
+                except Exception as e:
+                    return self._send(400, {"ok": False, "message": "%s: %s" % (type(e).__name__, e)})
+                return self._send(200, {"ok": True})
+            if path == "/lock":          # agent 的視覺模型指到的目標框（相機座標 0–1000），/live 畫出來；不走動作鎖、不碰 zmq
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    d = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+                    box = [float(v) for v in d["box"]][:4]
+                    backend._cam_lock = {"box": box, "label": str(d.get("label", "target")), "t": time.time()}
                 except Exception as e:
                     return self._send(400, {"ok": False, "message": "%s: %s" % (type(e).__name__, e)})
                 return self._send(200, {"ok": True})
@@ -3081,6 +3782,9 @@ def main():
     ap.add_argument("--mirror-real", default=os.environ.get("ROBOT_MIRROR_REAL") or None, metavar="URL",
                     help="把這個（模擬）server 執行的底盤/手臂/夾爪動作同步送到實體 server（例如 http://127.0.0.1:8767）：模擬當眼睛，"
                          "實體照做同樣的動作；ROBOT_MIRROR_ACTIONS=move_arm,arm_to,gripper,recenter_arm 可以只鏡射手臂")
+    ap.add_argument("--explore", action="store_true", default=os.environ.get("ROBOT_EXPLORE") == "1",
+                    help="實體模式：陌生環境，地圖從零開始由前向 ToF + 里程計邊走邊建（scan_around / explore / navigate_to / "
+                         "return_to_origin 都用這張圖）；ROBOT_TOF_OFFSET_M 是 ToF 離車身中心的距離（預設 0.16）")
     ap.add_argument("--host", default="127.0.0.1",
                     help="預設只聽本機。要給遠端 Agent 用，建議走 SSH tunnel 或 Tailscale，不要直接開 0.0.0.0")
     ap.add_argument("--port", type=int, default=8765)
@@ -3096,7 +3800,7 @@ def main():
         backend = MockBackend()
     else:
         RoboMasterBackend.mirror_sim_port = args.mirror_sim   # _start_nexarm 在 __init__ 裡會讀，所以先掛在類別上
-        backend = RoboMasterBackend(args.mode, args.chassis_backend, arm=args.arm, arm_port=args.arm_port)
+        backend = RoboMasterBackend(args.mode, args.chassis_backend, arm=args.arm, arm_port=args.arm_port, explore=args.explore)
         if args.mirror_real and args.mode != "sim":
             # 鏡射只有模擬 server 做；實體 server 繼承到 ROBOT_MIRROR_REAL 會把動作再送給自己（2026-11-11 r01：每段 409 busy 重試 3 次多等 6 秒）
             print("[server] mode=%s 忽略鏡射設定 %s（只有 --mode sim 會鏡射）" % (args.mode, args.mirror_real))
@@ -3106,6 +3810,21 @@ def main():
             acts = os.environ.get("ROBOT_MIRROR_ACTIONS", "").strip()
             if acts:
                 backend.mirror_actions = tuple(a.strip() for a in acts.split(",") if a.strip())
+            backend.mirror_camera = os.environ.get("ROBOT_MIRROR_CAMERA", "1") != "0"
+            backend._start_mirror_feedback()
+            print("[server] 鏡射感知：/frame.jpg %s；實體 ToF 併進 tof_front_mm，看到地圖上沒有的東西會在模擬放方塊（ROBOT_MIRROR_CAMERA=0 關相機）"
+                  % ("= 實體前鏡頭" if backend.mirror_camera else "= 模擬相機"))
+            # 出發點：預設是 8765 啟動時模擬車的位置，但對齊實體時常在半路重開 8765（2026-11-14 重開在 (0.71,-0.18)），
+            # return_to_origin 就回到那裡，不是使用者擺車的掃描圖原點。鏡射時實體 8767 是在掃描圖 (0,0) 朝 0° 連線的，
+            # 它的里程計原點就是使用者說的「原位」，所以預設回 (0,0,0)；ROBOT_HOME_WORLD="x,y,朝向" 可以改。
+            hw = os.environ.get("ROBOT_HOME_WORLD", "").strip() or "0,0,0"
+            if getattr(backend, "_nav", None) is not None:
+                try:
+                    hx, hy, hh = [float(v) for v in hw.split(",")]
+                    backend._home_world = (hx, hy, hh)
+                    print("[server] 鏡射：出發點改成世界 (%.2f, %.2f) 朝向 %.0f°（實體連線時的位置；ROBOT_HOME_WORLD 可改）" % (hx, hy, hh))
+                except ValueError:
+                    print("[server] ROBOT_HOME_WORLD=%r 看不懂，要 x,y,朝向" % hw)
             try:
                 with urllib.request.urlopen(args.mirror_real.rstrip("/") + "/health", timeout=3) as resp:
                     h = json.loads(resp.read().decode("utf-8"))

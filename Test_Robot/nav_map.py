@@ -28,9 +28,41 @@ except Exception:  # pragma: no cover
     cv2 = None
 
 CELL = 0.05             # 格子邊長 (m)
-EXTENT = 3.5            # 地圖涵蓋 ±EXTENT (m)，跟俯視攝影機的 7 m 正交視野一致
+EXTENT = float(os.environ.get("ROBOT_NAV_EXTENT", 3.5))   # 地圖涵蓋 ±EXTENT (m)，預設跟俯視攝影機的 7 m 正交視野一致
 ROOM_HALF = 2.95        # 房間內側半寬：牆外的格子一律當障礙（不然南牆的門洞會讓規劃器把終點放到房間外）
+ROOM_BOUNDS = None      # (x0, x1, y0, y1) 長方形場地；None = ±ROOM_HALF 的正方形。掃描建的場地（Scan_*.ttt）是 11 m 的走道，由同名 .json 給
 N = int(round(2 * EXTENT / CELL))
+
+
+def configure(extent=None, room=None):
+    """改地圖範圍（要在建 NavMap 之前呼叫）：extent = 半寬 (m)，room = (x0, x1, y0, y1) 場地內側；
+    2026-11-13 手機掃描建的走道 x −4.7..6.4，±3.5 裝不下（使用者：「機器人可以走這整個環境」）。"""
+    global EXTENT, N, ROOM_BOUNDS
+    if extent is not None and abs(float(extent) - EXTENT) > 1e-9:
+        EXTENT = float(extent)
+        N = int(round(2 * EXTENT / CELL))
+    if room is not None:
+        ROOM_BOUNDS = tuple(float(v) for v in room)
+
+
+def configure_for_scene(sim):
+    """場景旁邊有同名 .json（tools/scan_to_scene.py 會寫 bounds）就照它設範圍；沒有就維持預設。回傳用了哪個檔。"""
+    try:
+        scene = sim.getStringParam(sim.stringparam_scene_path_and_name)
+        if scene and not os.path.isabs(scene):
+            scene = os.path.join(sim.getStringParam(sim.stringparam_application_path), scene)
+        side = os.path.splitext(scene)[0] + ".json" if scene else None
+        if not side or not os.path.exists(side):
+            return None
+        import json
+        b = json.load(open(side, encoding="utf-8")).get("bounds")
+        if not b or len(b) != 4:
+            return None
+        ext = math.ceil((max(abs(float(v)) for v in b) + 0.5) * 2) / 2.0
+        configure(extent=max(EXTENT, ext) if "ROBOT_NAV_EXTENT" not in os.environ else EXTENT, room=b)
+        return side
+    except Exception:
+        return None
 FLAT_MAX_Z = 0.03       # 頂面低於這個高度 → 地墊/地貼，可壓過
 CLEARANCE_Z = 0.30      # 底面高於這個高度 → 可從底下鑽過（EP 含手臂約 0.27 m）
 # 兩層膨脹（回歸測試的結論）：單一半徑小了會擦到牆角（0.15：停在球池牆前 4 cm，一轉身就掃到）、
@@ -65,6 +97,9 @@ class NavMap(object):
         self.sim = sim
         self.robot_root = robot_root
         self.robot_tree = set(sim.getObjectsInTree(robot_root, sim.handle_all, 0)) | {robot_root}
+        side = configure_for_scene(sim)
+        if side:
+            print("[nav] 場地範圍來自 %s：room %s，extent ±%.1f m（%d×%d 格）" % (side, ROOM_BOUNDS, EXTENT, N, N))
         self.static = np.zeros((N, N), dtype=bool)
         self.dynamic = np.zeros((N, N), dtype=bool)
         self.passages = []          # 通道內部矩形（世界座標）與軸向，膨脹後重新標成可走；見 passage_axis_at
@@ -136,7 +171,7 @@ class NavMap(object):
             if not scene or not os.path.exists(scene):
                 return None
             mtime = int(os.path.getmtime(scene))
-            key = hashlib.md5(("%s|%d|%s|%s|%s|v4" % (scene, mtime, CELL, ROBOT_RADIUS, PASSAGE_EXTEND)).encode()).hexdigest()[:12]
+            key = hashlib.md5(("%s|%d|%s|%s|%s|%s|%s|v5" % (scene, mtime, CELL, ROBOT_RADIUS, PASSAGE_EXTEND, EXTENT, ROOM_BOUNDS)).encode()).hexdigest()[:12]
             return os.path.join(tempfile.gettempdir(), "robot_nav_static_%s.npz" % key)
         except Exception:
             return None
@@ -189,12 +224,16 @@ class NavMap(object):
                 print("[nav] 快取寫入失敗（%s）" % e)
 
     def _mask_outside_room(self):
-        lo, _ = world_to_cell(-ROOM_HALF, -ROOM_HALF)
-        hi, _ = world_to_cell(ROOM_HALF, ROOM_HALF)
-        self.static[:lo, :] = True
-        self.static[hi + 1:, :] = True
-        self.static[:, :lo] = True
-        self.static[:, hi + 1:] = True
+        if ROOM_BOUNDS:
+            x0, x1, y0, y1 = ROOM_BOUNDS
+        else:
+            x0, x1, y0, y1 = -ROOM_HALF, ROOM_HALF, -ROOM_HALF, ROOM_HALF
+        lox, loy = world_to_cell(x0, y0)
+        hix, hiy = world_to_cell(x1, y1)
+        self.static[:loy, :] = True
+        self.static[hiy + 1:, :] = True
+        self.static[:, :lox] = True
+        self.static[:, hix + 1:] = True
 
     def refresh_dynamic(self, exclude_xy=None, exclude_r=0.0):
         """重讀非靜態物件。exclude_xy/exclude_r：這次的目標物本身不算障礙（不然終點會被自己封住）。"""
@@ -384,6 +423,13 @@ class NavMap(object):
         self.compose()
         return True
 
+    def unmark(self, x, y, r_cells=2):
+        """mark_blocked 的反向：動態障礙消失了（實體 ToF 看過去沒東西）就把那一塊清掉。"""
+        ix, iy = world_to_cell(x, y)
+        y0, y1, x0, x1 = max(0, iy - r_cells), iy + r_cells + 1, max(0, ix - r_cells), ix + r_cells + 1
+        self.dynamic[y0:y1, x0:x1] = False
+        self.compose()
+
     # ------------------------------------------------------------------ 規劃
     def is_free(self, ix, iy):
         return 0 <= ix < N and 0 <= iy < N and not self.inflated[iy, ix]
@@ -554,6 +600,9 @@ class NavMap(object):
         if cv2 is None:
             return None
         img = np.full((N, N, 3), 255, dtype=np.uint8)
+        known = getattr(self, "known", None)
+        if known is not None:
+            img[~known] = (222, 222, 222)         # 未知格（ToF 還沒掃到）：淺灰；只有 TofMap 有這一層
         img[self.inflated] = (235, 210, 170)      # 膨脹層：淡藍（BGR）
         img[self.static] = (40, 40, 40)           # 靜態障礙：黑
         img[self.dynamic] = (60, 140, 250)        # 動態障礙：橘
@@ -592,3 +641,200 @@ class NavMap(object):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 255), 1)
         ok, buf = cv2.imencode(".png", img)
         return buf.tobytes() if ok else None
+
+
+# ============================================================================
+# 陌生環境：地圖從零開始，由前向 ToF + 里程計邊走邊填（robot_server.py --explore）
+# ============================================================================
+TOF_HIT_INC = 2         # 一次命中加的分數
+TOF_HIT_MAX = 6
+TOF_OCC_THRESHOLD = 2   # 分數 ≥ 這個值才算障礙：單次命中就算（導航要立刻避），之後射線穿過去會慢慢扣回來
+KNOWN_RANGE_M = 1.5     # 只有離感測器這麼近的格子才算「真的看過」：4 m 外的讀值錐寬 1.4 m、又常抖，explore 要走近再看
+TOF_ARC_MAX_M = 0.10    # 命中格橫向展開的最大半寬（原 0.15：遠處的東西糊成一片）：20° 錐在 1 m 處半寬 0.18 m；沒展開的話 15° 一停的掃描會在牆上留 26 cm 的洞
+
+
+class TofMap(NavMap):
+    """沒有場景幾何、沒有 zmq：static 層永遠空，dynamic 層 = ToF 命中格（計分過門檻），known 層 = 射線掃過的格子。
+    未知格當可走（樂觀），靠導航每一步的 ToF 把關；explore 模式的 return_to_origin / navigate_to 都直接沿用 NavMap 的規劃。
+    世界座標 = 實體里程計的連線起點座標系（x 前、y 左、朝向逆時針為正，見 robot_server._odom_pose）。"""
+
+    def __init__(self, cone_deg=20.0, max_range_m=4.0, sensor_offset_m=0.16):
+        self.sim = None
+        self.robot_root = -1
+        self.robot_tree = set()
+        self.static = np.zeros((N, N), dtype=bool)
+        self.dynamic = np.zeros((N, N), dtype=bool)
+        self.known = np.zeros((N, N), dtype=bool)
+        self.hits = np.zeros((N, N), dtype=np.int16)
+        self.passages = []
+        self.passage_id = None
+        self.inflated = None
+        self.cost = None
+        self.clearance = None
+        self.static_shapes = 0
+        self.dynamic_shapes = 0
+        self.cone_deg = float(cone_deg)
+        self.max_range_m = float(max_range_m)
+        self.sensor_offset_m = float(sensor_offset_m)   # ToF 離車身中心的距離（車頭前緣）
+        self.known_range_m = KNOWN_RANGE_M                # explore 的「詳細程度」：越小越會走近看（detail=True 時 1.0）
+        self.readings = 0
+        self.version = 0        # 占據格每變一次 +1（sim_twin 用來決定要不要重畫方塊）
+        self.compose()
+
+    def build_static(self):
+        pass
+
+    def refresh_dynamic(self, exclude_xy=None, exclude_r=0.0):
+        self.compose()
+
+    def set_bounds(self, xmin, xmax, ymin, ymax):
+        """探索範圍（世界座標，原點 = 出發點）：外面當牆（static），規劃器不會走出去、邊界搜尋也不會把目標放外面。
+        2026-11-12 使用者：「盡量不要左邊，那是一個小門」。"""
+        self.bounds = (float(xmin), float(xmax), float(ymin), float(ymax))
+        self.static[:] = False
+        x0, y0 = world_to_cell(xmin, ymin)
+        x1, y1 = world_to_cell(xmax, ymax)
+        self.static[:y0, :] = True
+        self.static[y1 + 1:, :] = True
+        self.static[:, :x0] = True
+        self.static[:, x1 + 1:] = True
+        self.version += 1
+        self.compose()
+
+    def integrate(self, pose, dist_m):
+        """把一筆 ToF 讀值填進地圖。pose=(x, y, heading_deg) 車身中心；dist_m=None 代表量程內沒東西。
+        回傳 (hit_xy 或 None, 占據格有沒有變)。"""
+        a = math.radians(pose[2])
+        ux, uy = math.cos(a), math.sin(a)
+        x0, y0 = pose[0] + self.sensor_offset_m * ux, pose[1] + self.sensor_offset_m * uy
+        hit = dist_m is not None and 0.05 < dist_m <= self.max_range_m
+        end = dist_m if hit else self.max_range_m
+        self.readings += 1
+        # ToF 回報的是錐內最近的東西：整個 20° 錐在讀值距離以前都是空的，不只中線。錐內每條射線經過的格子標已知、扣分，
+        # 之前誤標的障礙（實測：第一次掃描時有人站在車旁，右側留下 0.3 m 的假障礙）轉一圈就會被清掉。
+        half = math.radians(self.cone_deg / 2.0) * 0.8   # 邊緣留兩成：錐邊的東西有時量得到、有時量不到
+        n_rays = max(1, int(math.ceil(2 * half * end / CELL)))
+        for k in range(n_rays + 1):
+            ang = a - half + 2 * half * k / float(n_rays)
+            rx, ry = math.cos(ang), math.sin(ang)
+            t = 0.0
+            while t < end - CELL:
+                ix, iy = world_to_cell(x0 + rx * t, y0 + ry * t)
+                if t <= self.known_range_m:
+                    self.known[iy, ix] = True
+                if self.hits[iy, ix] > 0:
+                    self.hits[iy, ix] = max(0, self.hits[iy, ix] - TOF_HIT_INC)   # 掃過扣的跟命中加的一樣重（原本只扣 1，錯的格子清不掉）
+                t += CELL / 2.0
+        hit_xy = None
+        if hit:
+            hx, hy = x0 + ux * end, y0 + uy * end
+            hit_xy = (hx, hy)
+            half = min(end * math.tan(math.radians(self.cone_deg / 2.0)), TOF_ARC_MAX_M)
+            s = -half
+            while s <= half + 1e-9:
+                ix, iy = world_to_cell(hx - uy * s, hy + ux * s)
+                self.known[iy, ix] = True
+                self.hits[iy, ix] = min(TOF_HIT_MAX, self.hits[iy, ix] + TOF_HIT_INC)
+                s += CELL / 2.0
+        # 遲滯：分數 ≥ 門檻才變障礙、扣到 0 才消掉。不然 ToF 在 2.5 m 讀值 ±3 cm 抖動，邊界格會每秒在障礙/可走之間
+        # 翻來翻去（實測靜止 50 秒版本號跳了 60 次，sim_twin 跟著每秒重畫方塊）
+        new_dyn = (self.hits >= TOF_OCC_THRESHOLD) | (self.dynamic & (self.hits > 0))
+        changed = bool((new_dyn != self.dynamic).any())
+        if changed:
+            self.dynamic = new_dyn
+            self.dynamic_shapes = int(new_dyn.sum())
+            self.version += 1
+            self.compose()
+        return hit_xy, changed
+
+    def clear_footprint(self, x, y, r_m=0.20):
+        """車身現在佔的那一塊一定是空的：命中分數歸零、標已知。每次位姿更新都呼叫（2026-11-12 使用者：車明明開過去了，障礙還在）。"""
+        ix, iy = world_to_cell(x, y)
+        r = int(math.ceil(r_m / CELL))
+        y0, y1, x0, x1 = max(0, iy - r), min(N, iy + r + 1), max(0, ix - r), min(N, ix + r + 1)
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        disk = (xx - ix) ** 2 + (yy - iy) ** 2 <= r * r
+        self.known[y0:y1, x0:x1] |= disk
+        sub = self.hits[y0:y1, x0:x1]
+        if (sub[disk] > 0).any():
+            sub[disk] = 0
+            self.dynamic = (self.hits >= TOF_OCC_THRESHOLD) | (self.dynamic & (self.hits > 0))
+            self.dynamic_shapes = int(self.dynamic.sum())
+            self.version += 1
+            self.compose()
+            return True
+        return False
+
+    def integrate_rays(self, pose, rays, hit_inc=1, free_dec=1, known_range_m=None):
+        """相機的地板邊界：rays = [(bearing_left_deg, dist_m 或 None)]，從車身中心出發（距離已經是從中心算）。
+        命中只加 hit_inc（預設 1，ToF 是 2）：一個停點看不到的方向要兩個停點都看到才算障礙，雜訊不會留下來；
+        經過的格子扣 free_dec。回傳占據格有沒有變。"""
+        kr = self.known_range_m if known_range_m is None else known_range_m
+        changed_any = False
+        for bearing, d in rays:
+            a = math.radians(pose[2] + bearing)
+            ux, uy = math.cos(a), math.sin(a)
+            hit = d is not None and 0.15 < d <= self.max_range_m
+            end = d if hit else min(self.max_range_m, 2.0)
+            t = self.sensor_offset_m
+            while t < end - CELL:
+                ix, iy = world_to_cell(pose[0] + ux * t, pose[1] + uy * t)
+                if t <= kr:
+                    self.known[iy, ix] = True
+                if self.hits[iy, ix] > 0:
+                    self.hits[iy, ix] = max(0, self.hits[iy, ix] - free_dec)
+                t += CELL / 2.0
+            if hit:
+                ix, iy = world_to_cell(pose[0] + ux * end, pose[1] + uy * end)
+                self.known[iy, ix] = True
+                self.hits[iy, ix] = min(TOF_HIT_MAX, self.hits[iy, ix] + hit_inc)
+        new_dyn = (self.hits >= TOF_OCC_THRESHOLD) | (self.dynamic & (self.hits > 0))
+        if bool((new_dyn != self.dynamic).any()):
+            self.dynamic = new_dyn
+            self.dynamic_shapes = int(new_dyn.sum())
+            self.version += 1
+            self.compose()
+            changed_any = True
+        return changed_any
+
+    def mark_blocked(self, x, y, r_cells=2):
+        ok = NavMap.mark_blocked(self, x, y, r_cells)
+        if ok:
+            ix, iy = world_to_cell(x, y)
+            y0, y1, x0, x1 = max(0, iy - r_cells), iy + r_cells + 1, max(0, ix - r_cells), ix + r_cells + 1
+            self.hits[y0:y1, x0:x1] = np.maximum(self.hits[y0:y1, x0:x1], TOF_OCC_THRESHOLD)  # 不然下一筆射線就扣掉了
+            self.known[y0:y1, x0:x1] = True
+            self.version += 1
+        return ok
+
+    def frontier_goal(self, robot_xy, min_dist_m=0.4, max_dist_m=2.5):
+        """探索目標：已知、可走、而且緊鄰未知格的格子裡，離機器人最近（但不要太近）的那一個。沒有就回 None。"""
+        if cv2 is None:
+            return None
+        unknown = (~self.known & ~self.static).astype(np.uint8)   # 範圍外不算未知（不然永遠有邊界）
+        near_unknown = cv2.dilate(unknown, np.ones((3, 3), np.uint8)).astype(bool) & self.known
+        cand = near_unknown & ~self.inflated & (self.clearance >= SWEEP_RADIUS)
+        ys, xs = np.nonzero(cand)
+        if len(xs) == 0:
+            return None
+        wx = -EXTENT + (xs + 0.5) * CELL
+        wy = -EXTENT + (ys + 0.5) * CELL
+        d = np.hypot(wx - robot_xy[0], wy - robot_xy[1])
+        okm = (d >= min_dist_m) & (d <= max_dist_m)
+        if not okm.any():
+            okm = d >= min_dist_m
+            if not okm.any():
+                return None
+        i = int(np.argmin(np.where(okm, d, np.inf)))
+        return float(wx[i]), float(wy[i])
+
+    def export(self):
+        """給 sim_twin 在視窗版畫方塊用：占據格的世界座標中心。"""
+        ys, xs = np.nonzero(self.dynamic)   # 邊界外的 static 牆不匯出（視窗版另外畫邊界線）
+        cells = [[round(float(-EXTENT + (ix + 0.5) * CELL), 3), round(float(-EXTENT + (iy + 0.5) * CELL), 3)]
+                 for ix, iy in zip(xs, ys)]
+        b = getattr(self, "bounds", None)
+        if b:   # 遠處（範圍外 0.6 m 以上）的命中多半是 4 m 外的雜訊，視窗版不畫，不然整個場景都是方塊（2026-11-12 使用者截圖）
+            cells = [c for c in cells if b[0] - 0.6 <= c[0] <= b[1] + 0.6 and b[2] - 0.6 <= c[1] <= b[3] + 0.6]
+        return {"cell_m": CELL, "extent_m": EXTENT, "occupied": cells, "known_cells": int(self.known.sum()),
+                "readings": self.readings, "version": self.version, "bounds": getattr(self, "bounds", None)}

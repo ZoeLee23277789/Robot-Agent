@@ -1,0 +1,112 @@
+{
+ "date": "2026-11-14 14:18",
+ "axes": {
+  "height_at_home": {
+   "desc": "抬高（前伸 150）",
+   "fixed": {
+    "x_mm": 150
+   },
+   "field": "y_mm",
+   "last_safe": 460,
+   "tight_at": null,
+   "note": "all steps fine"
+  },
+  "reach_at_250": {
+   "desc": "往前伸（高度 250）",
+   "fixed": {
+    "y_mm": 250
+   },
+   "field": "x_mm",
+   "last_safe": 450,
+   "tight_at": null,
+   "note": "all steps fine"
+  },
+  "reach_at_150": {
+   "desc": "往前伸（高度 150）",
+   "fixed": {
+    "y_mm": 150
+   },
+   "field": "x_mm",
+   "last_safe": 450,
+   "tight_at": null,
+   "note": "all steps fine"
+  },
+  "low_at_340": {
+   "desc": "放低（前伸 340）",
+   "fixed": {
+    "x_mm": 340
+   },
+   "field": "y_mm",
+   "last_safe": 30,
+   "tight_at": null,
+   "note": "all steps fine"
+  },
+  "high_at_350": {
+   "desc": "伸出去再抬高（前伸 350）",
+   "fixed": {
+    "x_mm": 350
+   },
+   "field": "y_mm",
+   "last_safe": 290,
+   "tight_at": null,
+   "note": "arm limit at 330"
+  },
+  "pitch_down": {
+   "desc": "夾爪往下轉（HOME）",
+   "fixed": {},
+   "field": "pitch_deg",
+   "last_safe": -75,
+   "tight_at": null,
+   "note": "arm limit at -90"
+  },
+  "pitch_down_far": {
+   "desc": "夾爪往下轉（前伸 300、高 200）",
+   "fixed": {
+    "x_mm": 300,
+    "y_mm": 200
+   },
+   "field": "pitch_deg",
+   "last_safe": -45,
+   "tight_at": null,
+   "note": "all steps fine"
+  },
+  "yaw_left": {
+   "desc": "底座往左轉（HOME）",
+   "fixed": {},
+   "field": "yaw_deg",
+   "last_safe": 60,
+   "tight_at": null,
+   "note": "all steps fine"
+  },
+  "yaw_right": {
+   "desc": "底座往右轉（HOME）",
+   "fixed": {},
+   "field": "yaw_deg",
+   "last_safe": -60,
+   "tight_at": null,
+   "note": "all steps fine"
+  },
+  "yaw_left_far": {
+   "desc": "伸出去往左轉（前伸 350、高 150）",
+   "fixed": {
+    "x_mm": 350,
+    "y_mm": 150
+   },
+   "field": "yaw_deg",
+   "last_safe": 45,
+   "tight_at": null,
+   "note": "all steps fine"
+  },
+  "yaw_right_far": {
+   "desc": "伸出去往右轉（前伸 350、高 150）",
+   "fixed": {
+    "x_mm": 350,
+    "y_mm": 150
+   },
+   "field": "yaw_deg",
+   "last_safe": -45,
+   "tight_at": null,
+   "note": "all steps fine"
+  }
+ }
+}
