@@ -197,6 +197,64 @@ ROBOT_MIRROR_REAL=http://127.0.0.1:8767 ./start_all.sh --restart   # 模擬 serv
 - 每題做完會自動走回出發點（2026-11-11）：run_batch 在 `--mirror-real` 時預設帶 `--home-after`（`--no-home-after` 關掉），run_evaluation 抓完真值後呼叫 `return_to_origin`。模擬裡這個動作用占據格地圖導航回出發點（server 啟動時記下的世界座標與朝向，會繞障礙），再轉回出發朝向；鏡射時實體跟著走同一條路，之後 reset_real 再用實體里程計補殘差。agent 也有 `return_to_origin()` 可用，任務說「回到出發點」就會用。
 - 批次沒開實體 server 或 EP 斷線時會停下來等（最多 10 分鐘），重啟 `./start_arm.sh --with-ep` 就會自己接著跑；中途停掉用 `--resume <batch_dir>` 續跑。
 
+### 陌生環境模式：實體自己建圖（2026-11-12）
+
+鏡射模式一個字都沒動；這是第二種「地圖來源」，只在 `--explore` 時啟動。實體 EP 自己當眼睛：地圖從零開始，由車頭那顆
+EP Core 套裝附的紅外線深度感測器（ToF，0.1–10 m、視角 20°，SDK `sub_distance` 第 0 槽）加里程計邊走邊填；
+`navigate_to` / `return_to_origin` 直接沿用同一套占據格 + A*。
+
+```
+./run_explore.sh --check          # 視窗版載空場景 Capstone_Explore_nexarm.ttt、sim_twin --real、8767 --explore
+./run_explore.sh --task "..."     # 同上，然後跑 agent（對 8767 講話）
+./run_explore.sh --stop
+```
+
+- **座標**：連線那一刻的車身位置 = 原點、車頭 = +x、y 左、逆時針為正（`_odom_pose`：SDK 的 y 跟 yaw 都反號）。放車時把車頭朝你想當 +x 的方向。
+- **地圖層**：灰 = 未知（還沒掃到）、白 = 射線掃過沒東西、橘 = ToF 命中。命中加 2 分、射線穿過扣 1 分、≥2 算障礙、扣到 0 才消（遲滯，不然 2.5 m 處 ±3 cm 的抖動會讓邊界格每秒翻面）。
+  命中格沿錐角橫向展開（最多 ±15 cm），15° 一停的掃描才不會在牆上留 26 cm 的洞。未知格當可走（樂觀），靠每一步的前方 ToF 把關。
+- **新動作**：`scan_around`（原地每 15° 停一下讀 ToF，轉一圈約 20 秒，等於一台很慢的一維 LiDAR；回報 8 個扇區最近的障礙）、
+  `explore`（走到最近的已知/未知邊界再掃，`steps` 次）。兩個都只在 explore 模式可用。
+- **相機測距（OpenCV，2026-11-12 晚）**：`Test_Robot/cam_floor.py`。一顆 ToF 一圈只有 36 筆，使用者：「障礙物位置不對」。相機一張畫面橫跨約 100°，
+  地板用「顏色 + 質感」分割（木紋地板有紋理、牆面是平的；牆跟地板的色度只差 2–7，單靠顏色分不開），每一欄由下往上掃到第一段非地板就是
+  地面距離；刻度用每一停「畫面中央欄的邊界列 ↔ ToF 距離」自動擬合 d = a/(row−r0)+b（穩健擬合丟掉殘差最大的 1/4，存 `~/.robot_cam_floor_calib.json`，
+  實測 53 組 rms 0.2 m）。一圈多 2200 筆，只用中央 ±28°、0.4–4 m（畫面底部是車自己的影子跟夾爪）；命中只加 1 分（兩個停點都看到才算）。
+  `/floor.jpg` 看最近一次的邊界偵測。只看得到站在地板上的東西，懸空桌面靠 ToF。
+- **存成模擬環境**：`~/rmenv/bin/python tools/export_explored_scene.py --dst 23002`（先開一個無視窗實例：
+  `cd ~/CoppeliaSim_Edu_V4_10_0_rev0_Ubuntu24_04 && (sleep infinity | ./coppeliaSim -h -GzmqRemoteApi.rpcPort=23002 scenes/Capstone_Explore_nexarm.ttt &)`）
+  → `scenes/Explored_<時間>.ttt`（空場景 + 合併後的障礙方塊 0.3 m 高、可碰撞 + 機器人在原點）＋同名 .png/.json。
+  不要對視窗版存檔：2026-11-12 視窗版 saveScene 35 MB 直接掛掉（Qt mutex 錯誤、zmq 不回應）。
+- **相機環景**：`scan_around` 每一停都拍一張，拼成 `/scan.jpg`（每格標「左轉幾度」跟 ToF 距離），人跟 agent 都能對照地圖看那個方向是什麼。
+- **用手機 LiDAR 掃描做底面（2026-11-13）**：ToF 自建的圖精度不夠時，用手機 3D 掃描 App 匯出 GLB/glTF（公尺），
+  `python -I tools/scan_floorplan.py scans/<日期>/<檔>.glb --out scans/<日期>/floorplan` 切出 5 cm 底面：離地 0.08–0.90 m 高度帶碰到的三角形全部投影到地面，
+  牆變成線、桌面/椅面整片投下來變實心（EP 加手臂約 0.45 m 高，桌子底下過不去，所以桌椅整塊都算占據），再閉運算補小洞。
+  然後 `tools/scan_to_scene.py scans/<日期>/floorplan.json --start X,Z --heading D --dst 23002`（出發點、車頭方向用模型座標，看 topdown.png 的格線；0=+x 90=+z）
+  轉成機器人座標（原點 = 出發點、車頭 +x），整張掃描都保留，存成 scenes/Scan_<名字>.ttt + 同名 .json（/map.json 格式）/.png。一樣要用無視窗 23002 存檔。
+  視窗版載這個場景時分身用 `tools/sim_twin.py --real http://127.0.0.1:8767 --no-map`，不然 server 自掃的舊占據格會疊上去。
+- **在掃描場地裡導航（2026-11-13 驗證）**：`nav_map.py` 的範圍不再寫死 ±3.5 m——場景旁有同名 .json（scan_to_scene 寫的 `bounds`）就自動改成
+  長方形場地、extent 放大（走道 11 m → ±7 m、280×280 格）；也可用環境變數 `ROBOT_NAV_EXTENT` 強制。步驟：
+  把 Scan_<名>.ttt 載進無視窗 23000（`sim.loadScene`）→ `./start_all.sh --restart` → `navigate_to` 就能走整條走道
+  （實測 (0,0)→(5,−0.3) 16 s、→(−4,0.3) 30 s、return_to_origin 殘差 0.09 m）。要連實體一起動就加 `ROBOT_MIRROR_REAL=http://127.0.0.1:8767`。
+  注意：在視窗版手動改完場景按存檔時，sim_twin 會把實體里程計的位姿一起存進去（機器人就不在 (0,0)），存檔前先關分身；
+  `--wall X0,Z0,X1,Z1` 補的牆（玻璃被 LiDAR 穿過的缺口）在 Scan_<名>.json 的 `walls` 裡。
+- **鏡射模式用實體的眼睛（2026-11-13）**：加了 `ROBOT_MIRROR_REAL` 之後 8765 的 `/frame.jpg` 改回傳實體前鏡頭（`ROBOT_MIRROR_CAMERA=0` 關掉），
+  `tof_front_mm` 取模擬與實體較近的那個（另給 `real_tof_front_mm`、`real_world_xy`、`real_battery_percent`）。實體 ToF 在 1.5 m 內看到
+  模擬地圖沒有的東西，車停穩後就在模擬場景放一根橘色 `real_obstacle_NNN` 方塊（視窗 23001 也放）、導航圖標占據，之後規劃會繞開。
+  agent 那邊俯視圖找不到的目標改用前鏡頭 + ToF 定位（`skills._locate_with_front_camera`），所以「走到箱子前面」在真實場地做得到。
+  場景裡要當目標的固定物（桌子）把那區方塊歸到 alias 同名的 dummy 底下，server 啟動時就是靜態地標（approach/go_to "table"）。
+- **假障礙會自己消**：ToF 回報的是錐內最近的東西，所以讀到 2.4 m 就把整個 20° 錐 2.4 m 以前標空（掃過扣的分跟命中加的一樣重）；
+  車身所在的半徑 20 cm 每次位姿更新都直接清空（車開過的地方一定是空的）。第一次掃描時有人站在車旁留下的 0.3 m 假障礙，重掃一圈就清掉。
+- **打滑補償**：原地轉一圈應該回到同一點，`scan_around` 轉回原朝向後把位置差當成麥克納姆輪打滑扣回里程計（實測每圈 2–10 cm；轉速降到 40°/s）。
+  不補的話五個停點就差半公尺、牆會重影。
+- **探索範圍與詳細度**：`ROBOT_EXPLORE_BOUNDS=xmin,xmax,ymin,ymax`（或 `explore` 的 `bounds`）外面當牆；`detail: true` 只有 1 m 內才算看過、每 10° 停一次掃
+  （預設 1.5 m / 15°），會真的走近看而不是站在原地掃一圈就說全看完了。3.5 m × 4 m 的範圍詳細模式約 10 個停點、6 分鐘。
+- **里程計座標軸**：SDK `position_m` 的 x 軸是「開機時的車頭」，不是連線時的；`_odom_pose` 先繞連線時的 yaw 旋轉再反號 y。
+  車被搬過一定要 `--stop` 重跑（里程計不知道）。
+- **視窗版**：`tools/sim_twin.py --real http://127.0.0.1:8767` 把里程計位姿搬到空場景的機器人上，`/map.json` 的占據格畫成灰色長方體
+  （每列相鄰格合併、靜態、不碰撞；版本號沒變就不重畫），路徑綠線、出發點藍框、目標洋紅框。
+  RoboMaster 模型根物件的座標系不是 x 前 z 上（前後輪差在 z 軸），分身用四個輪子的位置算出「前／左／上」再擺（`upright_frame`），不然車頭會朝地。
+- **診斷**：`RM_CONN_TYPE=sta ~/rmenv/bin/python tools/ep_tof_probe.py` 印 SDK 四個插槽的原始值（8767 要先關）。`ROBOT_TOF_OFFSET_M` = ToF 離車身中心的距離（預設 0.16）。
+- **限制**：一顆前向 20° ToF，側面盲；里程計會漂（麥克納姆輪打滑），沒有閉環，一個房間（約 4 m²）可以、整層樓不行。相機只認東西，距離靠 ToF。
+
 ## 2026-10-22 的一批修正（批次 all_20261021 之後）
 
 批次跑完 100 題（67%）後對照真值逐題追查，改了下面這些。改動都附在各檔案的註解裡，這裡只列結論：
