@@ -46,9 +46,11 @@ async def _creep_to_surface(robot, front_tof, notes, what, target_mm=110, max_st
     # 15:36 agent 實跑：approach 回報的 tof_front_mm 是 min(模擬, 實體)=214，實體其實 370，舊門檻 350 直接拒絕了四次。放寬到 600，分兩段貼近
     if tof is None or tof == 9999 or tof > 700:     # 700：_drive_to_visible 的「到了」門檻是 600，讀值抖一下（o_h2 讀到 614）不該整個拒絕
         return tof, (f"{what}: the REAL front distance sensor reads {tof} mm, so the box is not right in front of the robot "
-                     f"(tof_front_mm in the telemetry can be the simulated value: look at real_tof_front_mm). Turn to face the box "
-                     f"(face('<the box>')) and call this again; do not use pick() instead.")
-    for _ in range(3):
+                     f"(tof_front_mm in the telemetry can be the simulated value: look at real_tof_front_mm). "
+                     + ("Call place_on_top again: it finds the box and drives to it by itself. Do NOT recenter_arm, face or approach while "
+                        "carrying: in those arm poses the held object hides the distance sensor." if what == "place_on_top" else
+                        "Turn to face the box (face('<the box>')) and call this again; do not use pick() instead."))
+    for _ in range(6):      # 11-17：一步只走 7–10 cm，從 640 mm 開始三步只到 339，手臂搆不到箱子、東西放在箱子前面的地上
         if tof <= target_mm + 40:      # 底盤走不出 4 cm 以下的小步（實測送 0.02 m 完全沒動）
             return tof, None
         step = min(max_step, (tof - target_mm) / 1000.0)
@@ -58,6 +60,13 @@ async def _creep_to_surface(robot, front_tof, notes, what, target_mm=110, max_st
         await asyncio.sleep(0.4)
         new = front_tof(await robot.state())
         notes.append(f"crept {step:.2f} m closer ({'ok' if r.get('ok') else 'failed'}), front sensor {tof} -> {new} mm")
+        if step < 0.08 and isinstance(new, (int, float)) and new != 9999 and new <= tof + 15:
+            # 小步（< 8 cm）底盤常常動不了或只動一點（11-17：送 0.06 讀值 222→202；送 0.04 讀值 207→205，兩次都被誤判成「箱子被推走」）。
+            # 讀值沒變大就不是被推走：已經在目標附近幾公分內了，就停在這裡，剩下的交給手臂。
+            if new > tof - 0.5 * step * 1000:
+                return new, None
+            tof = new
+            continue
         if new is None or new == 9999 or new > tof - 0.4 * step * 1000:
             return new, (f"{what}: drove {step:.2f} m toward the surface but the front distance only went {tof} -> {new} mm: "
                          f"the box is probably sliding away (being pushed) or the sensor is not looking at it. Stopped; "
@@ -67,19 +76,80 @@ async def _creep_to_surface(robot, front_tof, notes, what, target_mm=110, max_st
 
 
 
+async def _free_lane(llm, jpg, ext, tof):
+    """箱頂上已經有東西時，手臂要從哪個方向伸進去（2026-11-17 o_h2，使用者：「要放的地方前面有一個球，擋到了手臂」）。
+    之前只對箱子的水平中心，中心那條線上剛好有球：手臂伸過去壓在球上，東西放歪倒下。
+    做法：請模型把箱頂上每樣東西點出來 → 每樣東西左右各留 6 cm（夾爪張開的半寬 + 餘裕）→ 箱子寬度內剩下的空檔裡，
+    選離箱子中心最近的方位。從車上看是一條「射線」，所以擋在前面或後面的都避得開。
+    回 (相對夾著的東西的方位角, 說明) 或 None（箱頂是空的 / 沒有空檔 / 模型沒回）。"""
+    # 問法（11-17 實測各 5 次）：「點出箱子上的東西」常漏掉白管（被夾著的棒子擋到一半）；模型原廠的通用問法「點出畫面裡的東西」
+    # 5 次都同時找到白管、毛球、箱子、夾著的棒子 → 用通用問法，哪些算「箱頂上的障礙」自己用位置篩。同時問三次取聯集。
+    prompt = ('Point to no more than 10 items in the image. The answer should follow the json format: '
+              '[{"point": <point>, "label": <label>}, ...]. The points are in [y, x] format normalized to 0-1000.')
+    res = await asyncio.gather(*[perception._points_all(llm, jpg, prompt) for _ in range(3)], return_exceptions=True)
+    pts, boxes = [], []
+    for r in res:
+        for x, y, lb in ([] if isinstance(r, Exception) else r[0]):
+            if "box" in lb.lower() or "carton" in lb.lower():
+                boxes.append((x, y))
+            elif not any(abs(x - q[0]) < 22 and abs(y - q[1]) < 45 for q in pts):
+                pts.append((x, y, lb))
+    if ext is None:
+        for bx_, by_ in boxes:                                   # 沒給箱子的框：用模型點到的箱子自己圈
+            ext = perception.surface_extent(jpg, bx_, by_)
+            if ext is not None:
+                break
+    B = _bearing
+    gap0 = B(NEX_GAP_REF[0])
+    d = 0.16 + (tof / 1000.0 if isinstance(tof, (int, float)) and tof < 2000 else 0.6) + 0.07
+    c = math.degrees(math.atan2(0.06, d))
+    far = ("tree", "chair", "stool", "rug", "skirt", "suitcase", "desk", "table", "floor", "wall", "door", "window", "light", "gripper", "robot")
+    pts = [q for q in pts if not any(w in q[2].lower() for w in far)
+           and not (abs(q[0] - NEX_GAP_REF[0]) < 45 and q[1] > 600)]      # 背景的東西、夾著的東西（夾爪正上方、畫面下半）不算
+    if ext is None:
+        obs = [q for q in pts if 250 <= q[1] <= 800]
+        lo, hi, centre = -14.0, 14.0, 0.0
+    else:
+        # 箱頂上的東西：左右在箱子範圍內，點的位置不低於箱子框的中段（更低的是箱子正面）
+        obs = [q for q in pts if ext[0] - 30 <= q[0] <= ext[2] + 30 and q[1] <= ext[1] + 0.5 * (ext[3] - ext[1])]
+        lo, hi = max(-14.0, B(ext[0]) - gap0 + 0.6 * c), min(14.0, B(ext[2]) - gap0 - 0.6 * c)
+        centre = max(lo, min(hi, 0.0)) if hi > lo else 0.0       # 車頭已經對著箱子：優先放正前方，被擋才往旁邊找
+    if not obs:
+        return None
+    blocks = []
+    for x, y, lb in obs:
+        bx = perception.box_around(jpg, x, y)
+        half = max(B(bx[2]) - B(bx[0]), 2.0) / 2.0 if (bx[2] - bx[0]) < 200 else 2.0
+        blocks.append((B(x) - gap0 - half - c, B(x) - gap0 + half + c))
+    gaps, cur = [], lo
+    for b0, b1 in sorted(blocks):
+        if b0 > cur:
+            gaps.append((cur, min(b0, hi)))
+        cur = max(cur, b1)
+    if cur < hi:
+        gaps.append((cur, hi))
+    gaps = [g for g in gaps if g[1] - g[0] >= 0.5]
+    if not gaps:
+        return None, ", ".join(sorted({lb or "object" for _, _, lb in obs}))      # 有東西、但沒有空檔
+    best = min((max(g[0], min(g[1], centre)) for g in gaps), key=lambda t: abs(t - centre))
+    return best, ", ".join(sorted({lb or "object" for _, _, lb in obs}))
+
+
 async def _drive_to_visible(robot, llm, label, front_tof, notes, low_view=False, carrying=False):
     """看著目標開過去（不靠地圖）：相機找到目標 → 轉到正對 → 往前一段 → 重複，直到實體 ToF ≤ 600 mm 或目標已在畫面最下緣。
     2026-11-14：箱子在 0.8 m 以外時 ToF 讀值在 0.8–1.4 m/9999 之間亂跳，地圖上的方塊放了又拆，approach 拿到錯的位置（1.74 m）；
     相機反而一直看得到棒子。回 None = 到了；回字串 = 失敗原因。"""
     if carrying:      # 夾著東西：不能回看路姿勢（夾爪會前傾 26°，東西歪掉），用夾爪水平、相機朝前下方的姿勢邊看邊開
-        await robot.act("arm_to", {"x_mm": 380, "y_mm": 120, "pitch_deg": 0.0, "yaw_deg": 0.0})
+        # 2026-11-17 夜：原本用 (380,120)，那個姿勢 ToF 被夾爪擋住、永遠讀 280–340 mm → 下面「ToF ≤ 600 = 到了」永遠成立，
+        # 車頭一對正就回報到了（其實還有 0.8–2.6 m）。改用量過的 NEX_CARRY_LOOK。
+        await robot.act("arm_to", {"x_mm": NEX_CARRY_LOOK[0], "y_mm": NEX_CARRY_LOOK[1], "pitch_deg": 0.0, "yaw_deg": 0.0})
     elif low_view:    # 地上的東西：看路姿勢（平視）在 1 m 外只拍得到它的頂端或完全拍不到，改用往下看約 25° 的姿勢找
         await robot.act("arm_to", {"x_mm": 250, "y_mm": 150, "pitch_deg": 0.0, "yaw_deg": 0.0})
     else:
         await robot.act("recenter_arm", {})
     backed = False
     turns_in_row = 0
-    for i in range(10):
+    for i in range(16):
         await asyncio.sleep(0.6)
         await robot.frame()
         jpg = await robot.frame()
@@ -97,14 +167,6 @@ async def _drive_to_visible(robot, llm, label, front_tof, notes, low_view=False,
                 if f.found:
                     notes.append(f"not in view at first: found it after turning {45 * (k + 1)} deg")
                     break
-        if not f.found and i > 0 and carrying and not backed:
-            # 夾著東西對箱子時轉完就看不到：多半是離箱子太近（箱子在畫面下緣外）或轉過頭。先直直退 0.4 m 拉開距離再看（只做一次）
-            backed = True
-            await robot.act("move_chassis", {"forward_m": -0.4, "right_m": 0, "turn_left_deg": 0, "push": False, "near_ok": True})
-            await asyncio.sleep(0.6)
-            await robot.frame()
-            jpg = await robot.frame()
-            f = await perception.locate(llm, jpg, label)
         if not f.found and i > 0:
             # 走到一半模型偶爾漏看（11-15 13:56：橘色棒子明明在畫面中間，第三張回「沒看到」）：換個說法、重拍再問兩次
             for alt in (f"{label} standing on the floor" if low_view else f"{label} on the box", label):
@@ -113,12 +175,23 @@ async def _drive_to_visible(robot, llm, label, front_tof, notes, low_view=False,
                 f = await perception.locate(llm, jpg, alt)
                 if f.found:
                     break
+        if not f.found and i > 0 and carrying and not backed:
+            # 重問兩次還是看不到：多半是離箱子太近（箱子在畫面下緣外）或轉過頭。先直直退 0.4 m 拉開距離再看（只做一次）。
+            # 11-17：原本一漏看就先退，箱子明明在 2 m 外的畫面正中間，白退 0.4 m。
+            backed = True
+            await robot.act("move_chassis", {"forward_m": -0.4, "right_m": 0, "turn_left_deg": 0, "push": False, "near_ok": True})
+            await asyncio.sleep(0.6)
+            await robot.frame()
+            jpg = await robot.frame()
+            f = await perception.locate(llm, jpg, label)
         if not f.found:
             return (f"cannot see '{label}' with the front camera from here (after {i} moves toward it"
                     f"{', and a full turn in place' if i == 0 else ''}). Drive somewhere it can be seen from, then call this again.")
         # 2026-11-16：夾著東西時原本容許 ±3° 而且每轉一次就重看，模型給的方位本身會抖幾度，11-15 最後一趟十圈全花在轉頭、一步沒前進。
         # 改成 ±5°，而且最多連轉兩次就一定往前走一步（走近之後方位誤差對應的橫向偏差也會變小）。
-        bearing = f.bearing_right_deg
+        # 夾著東西時一律以「夾爪所在的畫面位置」為基準（x≈553，不是畫面正中央）：以前圈得出整個箱子時用 553、圈不出來時用 500，
+        # 兩種基準差 4°，剛好在 ±5° 的門檻兩邊跳。
+        bearing = _bearing(f.x) - (_bearing(NEX_GAP_REF[0]) if carrying else 0.0)
         if carrying:
             # 2026-11-16 o_h2（使用者：「會一直撞到箱子」「放太邊了所以掉下去」）：模型只回箱子上的「一個點」，箱子在 0.5 m 外就佔 26° 寬，
             # 點落在左半邊還是右半邊每次不同 → 車頭左轉 20°、右轉 16° 來回擺，最後歪著貼上去（存下來的畫面：箱子中心在夾著的棒子右邊 12°）。
@@ -126,12 +199,12 @@ async def _drive_to_visible(robot, llm, label, front_tof, notes, low_view=False,
             # 而且要對到「夾著的東西」所在的畫面位置（夾爪在畫面 x≈553，不是正中央 500）。
             ext = perception.surface_extent(jpg, f.x, f.y)
             if ext is not None:
-                bearing = perception.bearing_from_x((ext[0] + ext[2]) / 2.0) - perception.bearing_from_x(NEX_GAP_REF[0])
+                bearing = _bearing((ext[0] + ext[2]) / 2.0) - _bearing(NEX_GAP_REF[0])
                 if perception.LOCK_HOOK is not None:
                     perception.LOCK_HOOK(ext, label)
             _drive_to_visible.last_bearing = (round(bearing, 1), ext is not None)
         if abs(bearing) > (5.0 if carrying else 4.0):
-            await robot.act("move_chassis", {"forward_m": 0, "right_m": 0, "turn_left_deg": round(-bearing, 1), "push": False, "near_ok": True})
+            await robot.act("move_chassis", {"forward_m": 0, "right_m": 0, "turn_left_deg": _turn_cmd(bearing), "push": False, "near_ok": True})
             await asyncio.sleep(0.4)
             turns_in_row += 1
             _drive_to_visible.last_bearing = None      # 轉過了：上面量到的方位作廢
@@ -148,9 +221,11 @@ async def _drive_to_visible(robot, llm, label, front_tof, notes, low_view=False,
         # 不再用「目標在畫面多低」判斷太近：模型常把物件指在底部（y≥960），從 1 m 外就誤判，18:29 / 18:37 兩趟各白白放棄 2–3 次。
         # 只看 ToF：每次都先把車頭對正目標，箱子進到 0.8 m 內 ToF 就讀得到；真的太近目標會掉出畫面，下一圈回報看不到。
         near = isinstance(tof, (int, float)) and tof != 9999 and tof < 1000
-        step = min(0.40, (tof - 350) / 1000.0) if near else 0.20
+        # 還遠（感測器讀不到箱子，或讀到 1.5 m 以上）：一步 0.35 m。11-17 從 2.3 m 外出發，每步 0.20 m、十圈走不到。
+        far = isinstance(tof, (int, float)) and (tof == 9999 or tof >= 1500)
+        step = min(0.40, (tof - 350) / 1000.0) if near else (0.35 if far else 0.20)
         await robot.act("move_chassis", {"forward_m": round(max(0.08, step), 2), "right_m": 0, "turn_left_deg": 0, "push": False, "near_ok": True})
-    return f"still not close to the {label} after 10 moves toward it."
+    return f"still not close to the {label} after 16 moves toward it."
 
 
 def _nex_depth_from_base_y(reach_mm, z_mm, y1000, surface_m):
@@ -181,8 +256,12 @@ NEX_FLOOR_AHEAD_M = 0.87              # 目標對到「夾爪開口正上方 97 
 NEX_FLOOR_DY = -97.0
 
 
-def _gripper_gap_cv(jpg):
-    """影像備援：俯視姿勢下夾爪是畫面中下方最大的幾塊黑色區域裡「最上面」那塊（手臂本體在它下面），指尖上緣往下 25 單位當開口。"""
+def _gripper_gap_cv(jpg, centre=False):
+    """影像備援：俯視姿勢下夾爪是畫面中下方最大的幾塊黑色區域裡「最上面」那塊（手臂本體在它下面），指尖上緣往下 25 單位當開口。
+    centre=True（靠近夾取用，2026-11-17）：x 改用夾爪「橫桿」的水平中心。使用者：「他還是沒有太對準去夾他」「會把東西撞倒」——
+    相機重新固定後畫面裡右指尖比左指尖高，「最上面那幾列」只剩右指尖（寬 20 px），量到的 x 是右指尖（625–690）不是開口中心（≈566）：
+    今天每一趟都把棒子對到右邊那根手指上，合爪時手指把棒子推倒。橫桿是整塊最寬的那幾列，不受指尖高低、棒子陰影影響（16 張實拍都在 563–567）。
+    回家對白點那邊的校正值是用舊量法存的，所以預設不變。"""
     import cv2
     import numpy as np
     img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
@@ -207,6 +286,13 @@ def _gripper_gap_cv(jpg):
     ys, xs = np.nonzero(lab[top: top + max(8, h // 25)] == best)
     if len(xs) == 0:
         return None
+    if centre:
+        blob = lab == best
+        rows = np.nonzero(blob.any(axis=1))[0]
+        ext = [(np.nonzero(blob[r])[0].min(), np.nonzero(blob[r])[0].max()) for r in rows]
+        wmax = max(b - a for a, b in ext)
+        bar = [(a + b) / 2.0 for a, b in ext if b - a >= 0.85 * wmax][:8]
+        return float(sum(bar) / len(bar) / w * 1000.0), float(top / h * 1000.0 - 45.0)
     return float((xs.min() + xs.max()) / 2.0 / w * 1000.0) - 15.0, float(top / h * 1000.0 - 45.0)     # 偏移對齊模型指的「開口」位置（實測差 +70/+15）
 
 
@@ -275,7 +361,7 @@ def _color_base(jpg, ref, near=None):
     return float(xs.mean() / w * 1000.0), float(bot / h * 1000.0)
 
 
-async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes):
+async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes, arm_only=False):
     """夾取高度下「邊看邊往前」（使用者 11-15：「他可以對準之後再往前吧」「相機沒有能夠非常固定的位置」）。
     手臂停在夾取姿勢 (r0, z)，同一張畫面裡量夾爪指尖那條線和物件底部：底部還在指尖線上方 = 還沒到，車往前一小段再看；
     左右偏了用底盤橫移修（不轉底座：轉了畫面整個變，11-15 轉完模型讀值亂跳把棒子弄丟）。底部降到指尖線（或被夾爪擋住）就停。
@@ -283,7 +369,10 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes):
     回 (yaw, None) = 到指尖前了；(yaw, 原因字串) = 失敗。"""
     what = f"the bottom end of the {label}, where it touches the floor"
 
-    color = {"ref": None, "last": None}
+    # arm_only（2026-11-17）：物件已經在夾爪前幾公分時的「重新對一下左右」。底盤一步都不動、手臂不伸，只轉底座；看不到就當作在指間。
+    # 用第一次靠近時記下的顏色，不重新問模型：這麼近的色塊又大又寬，會被「不像直立物件」的檢查退回 → 變成「看不到」→ 往前衝 12 cm
+    # （19:53 那趟就是這樣把已經在夾爪裡的棒子又推了一次）。
+    color = {"ref": getattr(_close_in_by_sight, "last_ref", None) if arm_only else None, "last": None}
 
     async def look():
         """回 (gap, (x, y) 或 None)。有顏色基準就用顏色找（穩、快）；還沒有就問模型，問到的同時取它的顏色當基準。"""
@@ -293,7 +382,7 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes):
             await robot.frame()
             jpg = await robot.frame()
             _save_frame(jpg, "closein")
-            gap = _gripper_gap_cv(jpg)
+            gap = _gripper_gap_cv(jpg, centre=True)
             cb = _color_base(jpg, color["ref"], color["last"])
             if cb is not None:
                 color["last"] = cb
@@ -304,7 +393,7 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes):
             jpg = await robot.frame()
             if k == 0:
                 _save_frame(jpg, "closein")
-            g = _gripper_gap_cv(jpg)
+            g = _gripper_gap_cv(jpg, centre=True)
             if g is not None:
                 gap = g
             if color["ref"] is None:
@@ -320,6 +409,7 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes):
                             notes.append(f"colour blob at the model's point is {bw}x{bh} px, not an upright object: not tracking that")
                             continue
                         color["ref"], color["last"] = ref, cb
+                        _close_in_by_sight.last_ref = ref
                         notes.append(f"tracking the {label} by colour (hue {ref[0]:.0f})")
                         return gap, cb
             f = await perception.locate(llm, jpg, what)
@@ -342,15 +432,24 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes):
         """使用者 11-15：「你還是會不小心把他推倒」「你撞到箱子了」——手臂降在地面附近時底盤一動（尤其小步修正的來回晃）夾爪就掃到東西，
         而且那個姿勢 ToF 被夾爪擋住、防撞是關的。規則：手臂降下去之後底盤不准動。要動底盤就先把手臂抬到 150（ToF 看得到前面、防撞開著），
         動完再降回夾取高度。"""
+        # 2026-11-17：這裡原本用 _move_exact（看里程計補到 2 cm 內）。實體小步本來就差 ±3 cm（同樣送 0.10，ToF 量到走了 96–112 mm；
+        # 送 0.05–0.06 走了 20–67 mm），補正只會前後來回晃、把對好的左右晃掉。這個迴圈每一步都會重看畫面，所以改成「看一次、動一次」。
         await arm(r0, 150, 0.0, yaw)
-        await _move_exact(robot, fwd, right, tol=0.02)
+        await robot.act("move_chassis", {"forward_m": round(float(fwd), 3), "right_m": round(float(right), 3), "turn_left_deg": 0,
+                                         "push": False, "near_ok": True})
+        await asyncio.sleep(0.5)
+        if z_mm < 60:
+            await arm(r0, 60, gp, yaw)             # 分兩段降：一次從 150 降到夾取高度，夾爪會往前甩一段弧
         await arm(r0, z_mm, gp, yaw)
 
     seen_close, log, blind = False, [], 0
+    nudged, arm_fix = False, 0
+    min_dy = 1e9
     was_near, yaw0, side_fix = False, float(yaw), 0
+    near_stuck = False
     last_dy, jumps = None, 0
     r_cur = float(r0)
-    NEAR = 230.0        # 底部離指尖線不到這麼多（畫面單位）= 很接近了：底盤不准再動，只動手臂
+    NEAR = 150.0        # 11-17：230 時底盤太早停，手臂要伸到 441 mm（極限）才碰到棒子，只夾到指尖、沒辦法再伸進去重夾，一轉就掉。原值 230； 底部離指尖線不到這麼多（畫面單位）= 很接近了：底盤不准再動，只動手臂
     for i in range(26):
         gap, pt = await look()
         if gap is None:
@@ -359,7 +458,7 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes):
         if pt is None:
             # 曾經很接近過（上一個可信讀值在 NEAR 內）之後看不到 = 被夾爪擋住了，當作到了。絕對不能再讓底盤往前
             # （11-15：到了 +57 之後一次漏看就觸發「看不到往前 12 cm」，整台車開過頭把東西撞開）
-            if seen_close or (last_dy is not None and last_dy <= NEAR):
+            if arm_only or seen_close or (last_dy is not None and last_dy <= NEAR):
                 log.append("hidden behind the gripper")
                 break
             if blind < 6:                          # 這個姿勢只看得到車前約半公尺：還太遠就每次往前 12 cm 再看，最多 6 次
@@ -374,14 +473,25 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes):
             jumps += 1                             # 已經很近了卻突然「變遠」一大截 = 模型指錯地方，這張不算，重看
             log.append(f"[ignored jump {dy:+.0f}]")
             continue
-        if was_near and dy > NEAR:
+        if was_near and dy > NEAR and min_dy <= 60.0:
             # 2026-11-16 o_h2（使用者：「明明就已經碰到他了怎麼沒有抓，然後還換位置把棍子弄到了」）：棒子已經進到兩指之間（存下來的畫面看得很清楚），
             # 它的下半截在夾爪的陰影裡、顏色變暗，顏色追蹤的「底部」一下跳到上面去 → 讀值從 +31 變成 +236 → 被當成「還很遠」→ 底盤往前開，把棒子撞倒。
             # 曾經很近過之後又「變遠」= 被夾爪擋住/遮暗了，東西就在指間：停，交給合爪。接近之後底盤絕對不再動。
             log.append(f"({ex:+.0f},{dy:+.0f}) reads far again after being close: it is between the fingers (hidden/shaded by the gripper)")
             break
+        # 2026-11-17 21:0x：讀值 +144 → +150（門檻 150 上下抖 6 個單位）就被上面那條當成「近過又變遠」而結束，棒子其實還在 10 cm 外，
+        # 後面合了 13 次爪、伸到 447 mm 才用指尖夾到。要真的近過（曾經 ≤ 60）才算。
+        min_dy = min(min_dy, dy)
         last_dy = dy
         log.append(f"({ex:+.0f},{dy:+.0f})")
+        if arm_only:
+            new_yaw = max(yaw0 - 8.0, min(yaw0 + 8.0, yaw - max(-5.0, min(5.0, ex * 0.04))))
+            if abs(ex) > 25 and arm_fix < 3 and abs(new_yaw - yaw) >= 0.5:
+                arm_fix += 1
+                yaw = new_yaw
+                await arm(r_cur, z_mm, gp, yaw)
+                continue
+            break
         near = dy <= NEAR
         was_near = was_near or near
         # 「到了沒」改用比例判斷（11-15：只看底部會提早/太晚，因為底部在地上、指尖在離地 12 cm，兩者的畫面關係隨相機俯仰變）：
@@ -410,8 +520,14 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes):
                     r_cur, was_near, last_dy = float(r0), False, None
                     log.append("sideways off with the base at its limit: lifted the arm, slid the chassis, closing in again")
                     continue
-                yaw = new_yaw
-                await arm(r_cur, z_mm, gp, yaw)
+                if abs(new_yaw - yaw) < 0.5:
+                    # 18:4x：底座到上限、還偏 45 單位（不到 60，不橫移）→ 同一個讀值 (-45,+136) 看了 18 次什麼都沒做。
+                    # 偏 60 以內棒子還在兩指開口內（半個開口約 80 單位）：不再修左右，直接往下走「手臂往前伸」。
+                    near_stuck = True
+                else:
+                    near_stuck = False
+                    yaw = new_yaw
+                    await arm(r_cur, z_mm, gp, yaw)
             else:                                  # 還遠：底盤橫移（物件在夾爪右邊 → 車往右）
                 # 11-15：舊增益 (0.5+dy×0.0012) 讓左右來回擺（−208→+194→…），18 次都耗在這。減半，而且偏不多時同一圈接著往前
                 mm_per_unit = 0.3 + max(0.0, dy) * 0.0005
@@ -423,9 +539,23 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes):
                     await chassis(0.0, lat)
                     r_cur = float(r0)
                     continue
-            if near:
+            if near and not near_stuck:
                 continue
-        if frac is None and dy <= 35:
+        if near and not nudged and r_cur <= r0 + 1.0:
+            # 2026-11-17 最後一段的距離問題（使用者：「你還是把東西會弄倒阿，我真的不知道為什麼」）。今天四趟的數字：
+            # 底部對到指尖線（dy≈+5）時，手臂還要再伸 60–75 mm 以上夾爪才第一次碰到它（368→443、381→441、380→440、381→441 還碰不到）——
+            # 因為底部在地上、指尖在離地 12 cm，從上面的相機看過去「對齊」其實還隔一段；再近底部就被夾爪擋住，看不到了。
+            # 手臂從這裡只剩 6–8 cm 可伸，所以每趟都是伸到極限用指尖夾、或伸到底還沒碰到 → 車子「盲開」8 cm 再把手臂降下去，
+            # 夾爪直接降在棒子上（19:53 存下來的畫面：棒子被壓歪卡在橫桿前），棒子就是這樣被推倒的。
+            # 改成：趁棒子還看得到、還隔著一段時，手臂抬高，底盤一次補到「再伸約 4 cm 就碰到」的位置，之後底盤不再動、只伸手臂。
+            # 每多 1 mm 距離 dy 約多 3.8 單位（手臂 357→381 時 dy +94→+3）。底盤小步誤差 ±3 cm，所以留 4 cm 而不是貼上去。
+            nudged = True
+            adv = min(0.10, (65.0 + dy / 3.8 - 40.0) / 1000.0)
+            if adv >= 0.03:        # 不到 3 cm 就不補：手臂自己伸得到，而底盤最小步的誤差（±2.5 cm）比要補的還大
+                await chassis(max(0.04, adv), 0.0)
+                log.append(f"final chassis step {max(0.04, adv) * 100:.0f} cm with the arm lifted: now only the arm moves")
+                continue
+        if dy <= 35:      # 以前還要求 frac 是 None：實測棒子完全在指間時 frac 也只有 0.2（底部被橫桿擋住），等 0.45 等不到，手臂就一直往前伸、把棒子在地上推著走
             break
         seen_close = dy <= 160
         if near:
@@ -458,9 +588,9 @@ async def _servo_to_floor_object(robot, llm, label, notes):
         f = await perception.locate(llm, jpg, f"{label} standing on the floor")
         if f.found:
             seen = True
-            if abs(f.bearing_right_deg) <= 5.0:
+            if abs(_bearing(f.x)) <= 5.0:
                 break
-            await robot.act("move_chassis", {"forward_m": 0, "right_m": 0, "turn_left_deg": round(-f.bearing_right_deg, 1), "push": False, "near_ok": True})
+            await robot.act("move_chassis", {"forward_m": 0, "right_m": 0, "turn_left_deg": _turn_cmd(_bearing(f.x)), "push": False, "near_ok": True})
         elif not seen and k == 0:
             # 平視第一眼就看不到：多半是太近（15 cm 高的東西在 0.5 m 內掉在畫面下緣外）→ 先直直退 0.5 m 再看，不要馬上轉走
             await robot.act("move_chassis", {"forward_m": -0.5, "right_m": 0, "turn_left_deg": 0, "push": False, "near_ok": True})
@@ -486,8 +616,8 @@ async def _servo_to_floor_object(robot, llm, label, notes):
                 f = await perception.locate(llm, jpg, f"{label} standing on the floor")
             if not f.found or f.y >= 820:
                 break
-            if abs(f.bearing_right_deg) > 5.0:
-                await robot.act("move_chassis", {"forward_m": 0, "right_m": 0, "turn_left_deg": round(-f.bearing_right_deg, 1), "push": False, "near_ok": True})
+            if abs(_bearing(f.x)) > 5.0:
+                await robot.act("move_chassis", {"forward_m": 0, "right_m": 0, "turn_left_deg": _turn_cmd(_bearing(f.x)), "push": False, "near_ok": True})
             await _move_exact(robot, 0.25 if f.y < 650 else 0.12, 0.0, tol=0.03)
             steps += 1
         notes.append(f"gripper not in view at the look pose: drove toward it by bearing in {steps} steps")
@@ -573,6 +703,26 @@ NEX_BOX_TOP_M = float(os.environ.get("ROBOT_BOX_TOP_M", "0.25"))     # 放倒的
 # 2026-11-16 使用者：「箱子的尺寸又不是固定的，他不能夠自己適應嗎？」——箱頂高度不再當成固定值：place_on_top 放下時用手臂「碰到面」
 # 量出實際高度，記在這個檔案；之後 30 分鐘內 pick_from_top / place_on_top 沒指定高度時就用量到的值，沒量過才退回上面的預設。
 _BOX_TOP_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs", "_box_top.json")
+# 夾著東西「邊看邊開」的手臂姿勢（前伸, 高度）。2026-11-17 夜實測（夾著橘色棒子、前方實際 2.6 m）：
+#   (152,98) 原位 → ToF 讀 105 mm；(380,120) → 280–337 mm：感測器照到的是夾爪和手上的東西，不是前面。
+#   (380,160)、(380,200)、(300,150)、(250,200 以上) → 讀得到 2.5–2.7 m。鏡頭方面 (380,160) 看得到地面和箱子，(250,250)/(250,295) 只看得到天花板。
+NEX_CARRY_LOOK = (380, 160)
+# 手臂相機的水平視角。2026-11-17 夜在實機量的：原地轉 7 個角度（實體朝向 21.9°–57.7°），用影像比對追同一個箱子，
+# 朝向每變 10.7° 箱子在畫面橫移 106/1000 → tan(HFOV/2)=0.90 → 約 84°。perception 的預設值是 100°（遊戲場模擬相機用的），
+# 拿來算這顆相機的方位角會大三成；再加上實體底盤轉小角度會多轉三成（送 8° 轉了 10–10.7°，送 16° 轉 15–16°），
+# 「看到偏幾度就轉幾度」等於每次修 1.7 倍：車頭在目標兩側來回擺（使用者：「他現在會一直轉」；11-16 的「左轉 20°、右轉 16° 來回擺」也是）。
+NEX_CAM_HFOV_DEG = float(os.environ.get("ROBOT_NEX_CAM_HFOV", "84"))
+
+
+def _bearing(x1000):
+    """手臂相機畫面 x（0–1000）→ 方位角（右為正），用量過的視角。"""
+    return perception.bearing_from_x(x1000, NEX_CAM_HFOV_DEG)
+
+
+def _turn_cmd(bearing_right_deg):
+    """把偏 bearing 度的目標轉到正前方，move_chassis 的 turn_left_deg 要送多少：12° 以內的小角度實體會多轉三成，先打 75 折。"""
+    t = -float(bearing_right_deg)
+    return round(t * 0.75 if abs(t) < 12.0 else t, 1)
 NEX_CARRY_Z_MM = 295.0            # 夾著東西靠近箱子時手臂舉到的高度（相機排線的上限 300 mm）：夾點離物件底部 12 cm 時底部離地 0.34 m
 
 
@@ -788,6 +938,7 @@ async def pick_from_top(robot, llm, obj: str, surface_m: Optional[float] = None,
         notes.append(f"no usable depth estimate (base y={pb.y if pb.found else None}, est {d_est}), probing step by step")
     holding, real_msg, g, reach_mm = False, "", {}, r0
     n_close = 0
+    shallow_redo = False
     while rr <= rr_max:
         r = await arm(rr, z_grasp * 1000, gp, yaw)
         if not r.get("ok"):
@@ -810,16 +961,38 @@ async def pick_from_top(robot, llm, obj: str, surface_m: Optional[float] = None,
             # 17:28 實測再伸 3 cm 只會把棍子推倒。只能用指尖夾住它的近側。
             # 細的物件（合爪後夾爪角度 > −5°，約 3.5 cm 以下）進得去兩指之間：鬆開、再伸 2.5 cm、重夾，讓它坐進夾爪裡；
             # 重夾沒夾到就退回原位再夾。粗的（5 cm 棍子合到 −22°）不做。
+            # 2026-11-17（使用者：「他只有抓到一點點…抓到了之後再把爪子打開然後往前一點點去真的抓穩」）：今天對準改用開口中心後，
+            # 棒子是正對兩指中間的（存下來的畫面），只被指尖夾住底部、舉起來是歪的。之前「再伸會推倒」是因為當時其實對在右指上。
+            # 粗的（合到 −25° 以內 = 進得了開口）也重夾，但只多伸 15 mm；重夾沒夾到一樣退回原位再夾。
             first = await claw_now()
-            if isinstance(first, (int, float)) and first > -5 and rr + 25 <= 450:
+            if on_floor and rr + 15 > 450 and not shallow_redo:
+                # 手臂伸到底才夾到 = 只有指尖夾著（使用者 11-17：「他根本沒有抓到棒子吧」——舉起來還在，手腕一轉就掉了）。
+                # 鬆開、手臂抬起縮回、車往前 6 cm、重新邊看邊對，再從頭伸一次，這樣才有餘裕伸進去夾穩。
+                shallow_redo = True
+                await robot.act("gripper", {"state": "open"})
+                await asyncio.sleep(0.6)
+                await arm(r0, z_grasp * 1000, gp, yaw)
+                await arm(r0, 150, 0.0, yaw)
+                await robot.act("move_chassis", {"forward_m": 0.05, "right_m": 0, "turn_left_deg": 0, "push": False, "near_ok": True})
+                await asyncio.sleep(0.5)
+                await arm(r0, 60, gp, yaw)
+                await arm(r0, z_grasp * 1000, gp, yaw)
+                y2, why2, r2 = await _close_in_by_sight(robot, llm, label, arm, r0, z_grasp * 1000, gp, yaw, notes, arm_only=True)
+                if not why2:
+                    yaw = y2
+                rr, holding = r0, False
+                notes.append("gripped only at full reach (fingertips): let go, drove 5 cm closer and reached again")
+                continue
+            deeper = 25 if (isinstance(first, (int, float)) and first > -5) else (15 if (isinstance(first, (int, float)) and first > -25) else 0)
+            if deeper and rr + deeper <= 450:
                 await robot.act("gripper", {"state": "open"})
                 await asyncio.sleep(0.8)
-                r2 = await arm(rr + 25, z_grasp * 1000, gp, yaw)
+                r2 = await arm(rr + deeper, z_grasp * 1000, gp, yaw)
                 g2 = await robot.act("gripper", {"state": "close"})
                 m2 = str((g2.get("real") or {}).get("message", ""))
                 if r2.get("ok") and "closed on something" in m2:
-                    g, real_msg, reach_mm = g2, m2, rr + 25
-                    notes.append(f"thin object: re-seated 25 mm deeper (claw {first} -> {await claw_now()} deg)")
+                    g, real_msg, reach_mm = g2, m2, rr + deeper
+                    notes.append(f"opened and re-seated {deeper} mm deeper for a firm grip (claw {first} -> {await claw_now()} deg)")
                 else:
                     await robot.act("gripper", {"state": "open"})
                     await asyncio.sleep(0.6)
@@ -842,9 +1015,16 @@ async def pick_from_top(robot, llm, obj: str, surface_m: Optional[float] = None,
         await robot.act("gripper", {"state": "open"})
         await arm(r0, z_grasp * 1000, gp, yaw)
         await arm(r0, 150, 0.0, yaw)               # 手臂先抬起來才動底盤（降著時底盤不准動）
-        await _move_exact(robot, 0.08, 0.0)
+        # 伸到 441 都沒碰到 = 它至少還在指尖前 1–2 cm：只往前 5 cm（一次、不補正），手臂分兩段降，降下去時它還在指尖前面
+        await robot.act("move_chassis", {"forward_m": 0.05, "right_m": 0, "turn_left_deg": 0, "push": False, "near_ok": True})
+        await asyncio.sleep(0.5)
+        await arm(r0, 60, gp, yaw)
         await arm(r0, z_grasp * 1000, gp, yaw)
         rr = r0
+        # 底盤動過，左右一定跟剛才不一樣：只轉手臂底座重新對一次（底盤不動、看不到也不往前）
+        y2, why2, r2 = await _close_in_by_sight(robot, llm, label, arm, r0, z_grasp * 1000, gp, yaw, notes, arm_only=True)
+        if not why2:
+            yaw, rr = y2, max(r0, min(450.0, r2))
         while rr <= 450.0:
             r = await arm(rr, z_grasp * 1000, gp, yaw)
             if not r.get("ok"):
@@ -855,12 +1035,31 @@ async def pick_from_top(robot, llm, obj: str, surface_m: Optional[float] = None,
             holding = ("closed on something" in real_msg) if real_msg else bool(g.get("holding"))
             reach_mm = rr
             if holding:
+                # 這裡夾到的也一樣先鬆開、再伸 1.5 cm 重夾（原本只有第一輪會做，補位之後夾到的都是指尖淺夾）
+                first = await claw_now()
+                if isinstance(first, (int, float)) and first > -25 and rr + 15 <= 450:
+                    await robot.act("gripper", {"state": "open"})
+                    await asyncio.sleep(0.8)
+                    r2 = await arm(rr + 15, z_grasp * 1000, gp, yaw)
+                    g2 = await robot.act("gripper", {"state": "close"})
+                    m2 = str((g2.get("real") or {}).get("message", ""))
+                    if r2.get("ok") and "closed on something" in m2:
+                        g, real_msg, reach_mm = g2, m2, rr + 15
+                        notes.append(f"opened and re-seated 15 mm deeper for a firm grip (claw {first} -> {await claw_now()} deg)")
+                    else:
+                        await robot.act("gripper", {"state": "open"})
+                        await asyncio.sleep(0.6)
+                        await arm(rr, z_grasp * 1000, gp, yaw)
+                        g = await robot.act("gripper", {"state": "close"})
+                        real_msg = str((g.get("real") or {}).get("message", ""))
+                        holding = ("closed on something" in real_msg) if real_msg else bool(g.get("holding"))
+                        notes.append("deeper re-seat missed, gripped at the first contact again")
                 break
             await robot.act("gripper", {"state": "open"})
             await asyncio.sleep(0.6)
             rr += 15.0
     if advances:
-        notes.append(f"arm at full reach without a grip: drove 8 cm closer {advances} time(s) and reached again")
+        notes.append(f"arm at full reach without a grip: drove 5 cm closer {advances} time(s) and reached again")
     notes.append(f"{'closed on it at' if holding else 'nothing up to'} {reach_mm:.0f} mm after {n_close} close(s)")
     _save_frame(await robot.frame(), "pick_from_top_closed")
 
@@ -941,6 +1140,9 @@ async def place_on_top(robot, llm, surface_m: Optional[float] = None, object_h_m
     底盤貼到箱子前 → 手臂抬高 6 cm 移到放置點上方 → 垂直放下到比夾取高 5 mm → 爪子全開 → 水平退 2.5 cm 讓指尖離開 →
     抬高、歸位 → 用退出後的相機畫面確認它立著。剛用 pick_from_top 夾的而且車沒動過，就放回原本夾起來的位置。"""
     last = dict(_LAST_TOP_GRIP)
+    crowded = False
+    rolled = False
+    held_hue = None
     aim = None                 # 夾著東西對箱子時最後量到的「箱子中心偏幾度」，放的時候用手臂底座轉過去補
     if not last:
         try:
@@ -982,6 +1184,14 @@ async def place_on_top(robot, llm, surface_m: Optional[float] = None, object_h_m
     if on_floor:
         tof, err = 9999, None                      # 地上沒有箱面可以貼，就放在車前
     else:
+        # 2026-11-17 夜（使用者看著實機：「抬高就看不到前面的路了，他現在會一直轉跟動手臂，因為他看不到前面」）。量了才知道更糟：
+        # 夾著東西時，前方距離感測器在原位和舊的俯視姿勢都被夾爪/手上的東西擋住（讀 105 / 280–337 mm，實際前方 2.6 m）。於是
+        #   ·「離箱子不到 0.75 m → 先退 0.5 m」每次呼叫都成立：那一趟四次呼叫，車子一路退到離箱子 2.6 m；
+        #   · 開過去時「ToF ≤ 600 = 到了」也永遠成立：車頭一對正就說到了，手臂舉高才讀到真正的 0.8–2.6 m，然後失敗。
+        # 現在：先縮到感測器看得到前面的姿勢量一次；橫著/直著都用 NEX_CARRY_LOOK 邊看邊開（感測器、鏡頭都看得到前面）；
+        # 一路開到離箱子約 33 cm 才把手臂舉高（使用者：「快到了要放置的地方之後再舉高…再轉過來放下來」），最後 15 cm 只靠感測器貼近。
+        await robot.act("arm_to", {"x_mm": 250, "y_mm": 200, "pitch_deg": 0.0, "yaw_deg": 0.0})
+        await asyncio.sleep(0.5)
         t0 = front_tof(await robot.state())
         if not (same_spot_hint and isinstance(t0, (int, float)) and t0 <= 250):
             # 使用者 11-15：「你沒有對準箱子」——以前只在 ToF > 0.6 m 時才用相機對箱子；ToF 剛好掃到箱角或別的東西就直接往前貼，結果歪著。
@@ -989,23 +1199,84 @@ async def place_on_top(robot, llm, surface_m: Optional[float] = None, object_h_m
             # 11-15 17:54 放歪的原因：離箱子不到 0.6 m 時畫面只看得到箱角（還被夾著的東西擋住），沒轉正就直直貼上去，ToF 打到箱角，
             # 東西放到箱緣外、手臂把箱子頂歪。太近就先直直退 0.5 m，讓整個箱子進畫面再對正、靠近。
             if isinstance(t0, (int, float)) and t0 <= 750:
-                await robot.act("arm_to", {"x_mm": 250, "y_mm": 250, "pitch_deg": 0.0, "yaw_deg": 0.0})
                 await robot.act("move_chassis", {"forward_m": -0.5, "right_m": 0, "turn_left_deg": 0, "push": False, "near_ok": True})
-                notes.append("too close to see the whole box: backed up 0.5 m first")
+                notes.append(f"front sensor {t0} mm, too close to see the whole box: backed up 0.5 m first")
+            # 2026-11-17 使用者的做法：「夾到了之後把東西轉 90 度變成橫的，找到要放的地方以後再舉高，然後轉回來，再下放，
+            # 這樣就不會擋到相機、也不用一直舉高」——直立夾著時棒子從夾爪往下垂 12 cm，正好擋在鏡頭中間、又容易撞到箱子。
+            # 手腕轉 90° 讓它橫著（之後的 arm_to 不帶 roll，實體手臂會保持這個角度），伸到放置點上方之後才轉回直立。
+            # 轉之前先記下夾著的東西的顏色（直立夾著時它就在夾爪開口正上方）：放完用來確認箱頂上真的有它
+            await robot.act("arm_to", {"x_mm": NEX_CARRY_LOOK[0], "y_mm": NEX_CARRY_LOOK[1], "pitch_deg": 0.0, "yaw_deg": 0.0})
+            await asyncio.sleep(0.6)
+            await robot.frame()
+            jpg_h = await robot.frame()
+            held_hue = _hue_ref(jpg_h, NEX_GAP_REF[0], 700.0)
+            if held_hue is None:
+                # 上一次呼叫已經把它轉成橫的（這次是重試）：橫著時它在夾爪兩側、畫面最下面那一條
+                held_hue = _hue_ref(jpg_h, 430.0, 920.0) or _hue_ref(jpg_h, 660.0, 920.0)
+            # 使用者 11-17：「如果有物件拿起來會擋到鏡頭的話就可以轉 90 度」——不是每樣東西都轉：夾點以下垂著 10 cm 以上的長東西，
+            # 或夾著時它的顏色在畫面裡佔了三成以上的高度，才算擋鏡頭；短的（例如夾在 7.5 cm 處的白管）照原本直立帶著走。
+            blocks_view = grip >= 0.10
+            if held_hue is not None and not blocks_view:
+                if _color_base(jpg_h, held_hue, None) is not None:
+                    blocks_view = getattr(_color_base, "last_wh", (0, 0))[1] >= 0.35 * 360
+            if blocks_view:
+                await robot.act("arm_to", {"x_mm": NEX_CARRY_LOOK[0], "y_mm": NEX_CARRY_LOOK[1], "pitch_deg": 0.0, "yaw_deg": 0.0, "roll_deg": 90.0})
+                rolled = True
+                notes.append("turned the held object sideways (wrist roll 90) so it does not block the camera on the way")
+                # 「夾著」是合爪那一刻記下來的，東西後來掉了也還是 True（11-17：轉成橫的時掉在地上，後面整段對著空夾爪做完還回報成功）。
+                # 轉完再合一次爪：夾爪還是合不到底 = 還在；合到底了 = 掉了。
+                await asyncio.sleep(0.8)
+                g_chk = await robot.act("gripper", {"state": "close"})
+                m_chk = str((g_chk.get("real") or {}).get("message", ""))
+                if m_chk and "closed on something" not in m_chk:
+                    await robot.act("arm_to", {"x_mm": 250, "y_mm": 250, "pitch_deg": 0.0, "yaw_deg": 0.0, "roll_deg": 0.0})
+                    return False, (f"place_on_top [{'; '.join(notes)}]: the object slipped out of the gripper when it was turned sideways "
+                                   f"(the fingers now close all the way). It is on the floor near the robot: find it (survey_scene) and pick it up again.")
             _drive_to_visible.last = None
             why = await _drive_to_visible(robot, llm, "cardboard box", front_tof, notes, carrying=True)
             if why:
-                return False, f"place_on_top [{'; '.join(notes)}]: {why} (still holding it)"
+                return False, f"place_on_top [{'; '.join(notes)}]: {why} (still holding it; call place_on_top again, do not recenter_arm)"
             aim = getattr(_drive_to_visible, "last", None)
-        # 使用者 11-15：「你撞到箱子了，你要舉高一點點」——貼近箱子前先把手臂舉到放置高度上方，夾著的東西下端要高過箱頂
-        # 2026-11-16 使用者：「他如果舉的不夠高會撞到箱子」——不再用「假設的箱頂 + 6 cm」，一律舉到最高（NEX_CARRY_Z_MM）才靠近：
-        # 箱子多高都一樣，夾著的東西底部離地 0.34 m。真正的箱頂高度等一下放下時用手臂碰出來。
+            # 箱頂空檔要在這裡看：手臂還在邊看邊開的姿勢、離箱子 35–60 cm，箱頂看得最清楚。11-17 自己實測：
+            # 貼近之後手臂舉到 295，相機整個朝天花板（存下來的 place_lane 只有聖誕樹、柱子、電視），模型把「柱子、電視」當成箱頂的東西。
+            t_look = front_tof(await robot.state())
+            await robot.frame()
+            jpg_l = await robot.frame()
+            _save_frame(jpg_l, "place_lane")
+            lane = await _free_lane(llm, jpg_l, None, t_look)
+            if lane is not None and lane[0] is None:
+                # 正前方左右都有東西（箱子窄的那一頭朝著車時常這樣，東西其實在箱子後段）：不轉手臂，改放靠近箱緣一點（5 cm），離後面的東西遠一點
+                crowded = True
+                notes.append(f"box top is crowded ({lane[1]}): no free lane, putting it nearer the front edge")
+            elif lane is not None and isinstance(t_look, (int, float)) and t_look < 2000:
+                aim = {"bearing": (aim or {}).get("bearing", 0.0), "lane": round(lane[0], 1), "tof": t_look}
+                notes.append(f"things already on the box ({lane[1]}): free lane {lane[0]:+.0f} deg from straight ahead, the arm will turn to it")
+            # 第一段貼近：手臂還在邊看邊開的姿勢（鏡頭看得到前面、夾爪離箱子還有 12 cm 以上），貼到離箱子約 33 cm
+            tof, err = await _creep_to_surface(robot, front_tof, notes, "place_on_top", target_mm=300, max_step=0.10)
+            if err:
+                return False, err + " (still holding it; call place_on_top again, do not recenter_arm)"
+        # 快到了才舉高（使用者 11-15：「你撞到箱子了，你要舉高一點點」；11-16：「他如果舉的不夠高會撞到箱子」「箱子的尺寸又不是固定的」→ 舉到最高；
+        # 11-17：「橫著抓著的時候不需要抬到這麼高，抬高就看不到前面的路了…快到了之後再舉高」→ 所以只在最後這 15 cm 才舉）。
+        # 真正的箱頂高度等一下放下時用手臂碰出來。
         await robot.act("arm_to", {"x_mm": 250, "y_mm": int(NEX_CARRY_Z_MM), "pitch_deg": 0.0, "yaw_deg": 0.0})
         # 2026-11-16：一步最多 10 cm（原 25 cm）、停在 19 cm（原 15 cm）。使用者：「會一直撞到箱子」——歪著貼近時 ToF 沒打在箱面上，
         # 一步 20–25 cm 走完才發現讀值沒變，箱子已經被推走了。小步走，第一步讀值沒跟著變就停。
-        tof, err = await _creep_to_surface(robot, front_tof, notes, "place_on_top", target_mm=190, max_step=0.10)
+        tof, err = await _creep_to_surface(robot, front_tof, notes, "place_on_top", target_mm=165, max_step=0.10)   # 165：停在 ≤205 mm，手臂只要伸 ≤435（伸到 450 會下垂、量不準）
     if err:
         return False, err + " (still holding it)"
+    if not on_floor and depth_m is None and isinstance(tof, (int, float)) and tof > 215:
+        # 手臂最多伸 435 mm = 箱緣後 7 cm 只在 tof ≤ 205 時搆得到。搆不到就不要放（11-17 兩次都在箱子前面/箱緣鬆手，東西掉到地上）
+        return False, (f"place_on_top [{'; '.join(notes)}]: still {tof} mm from the box after creeping, too far for the arm to reach 7 cm "
+                       f"behind its edge. Nothing was released (still holding it). Call place_on_top again.")
+    if rolled:
+        # 轉回直立要在這裡做：手臂還縮著、舉在最高、夾爪在箱子前面約 10 cm 的空中，四周沒有東西。
+        # 2026-11-17 21:26 實機：我原本等伸到放置點正上方才轉回來，棒子下半截（12 cm）從左邊水平位置掃下來，
+        # 放完之後原本站在放置點左邊約 7 cm 的白瓶子不見了（放之前的畫面還在），應該就是被這一掃打下箱子的。
+        # 使用者說的順序本來就是「舉高 → 轉回來 → 再下放」。
+        await robot.act("arm_to", {"x_mm": 250, "y_mm": int(NEX_CARRY_Z_MM), "pitch_deg": 0.0, "yaw_deg": 0.0, "roll_deg": 0.0})
+        await asyncio.sleep(1.0)
+        rolled = False
+        notes.append("in front of the box with the arm raised: turned it upright again before reaching over the box")
     r90 = _nex_r_wrist90(z_mm)
     same_spot = last.get("reach_mm") and isinstance(last.get("tof_mm"), (int, float)) and abs(tof - last["tof_mm"]) <= 25
     if on_floor:
@@ -1016,14 +1287,15 @@ async def place_on_top(robot, llm, surface_m: Optional[float] = None, object_h_m
         reach, yaw = float(last["reach_mm"]), float(last.get("yaw_deg") or 0.0)
         notes.append("same standing spot as the pick: putting it back where it was")
     else:
-        reach, yaw = (0.16 + tof / 1000.0 + 0.07) * 1000, 0.0      # 不知道原位：放在箱緣後 7 cm（16:03 實測放在箱緣後 1 cm，太險）
+        reach, yaw = (0.16 + tof / 1000.0 + (0.05 if crowded else 0.07)) * 1000, 0.0      # 不知道原位：放在箱緣後 7 cm（16:03 實測放在箱緣後 1 cm，太險）
         if aim and isinstance(aim.get("tof"), (int, float)):
             # 左右：最後一眼箱子中心偏 b 度（在離手臂底座 0.16+tof+0.07 m 處）→ 橫向偏 e 公尺；直直貼近後 e 不變，
             # 用手臂底座轉 atan(e/reach) 把東西送到箱子中線上（底座 + = 左，方位 + = 右）。最多 ±20°。
-            e = (0.16 + aim["tof"] / 1000.0 + 0.07) * math.tan(math.radians(aim["bearing"]))
+            tgt = aim["lane"] if isinstance(aim.get("lane"), (int, float)) else aim["bearing"]     # 箱頂有東西：對空檔；沒有：對箱子中心
+            e = (0.16 + aim["tof"] / 1000.0 + 0.07) * math.tan(math.radians(tgt))
             yaw = max(-20.0, min(20.0, -math.degrees(math.atan2(e, reach / 1000.0))))
-            notes.append(f"box centre was {aim['bearing']:+.1f} deg off ({e * 100:+.0f} cm sideways): arm base yaw {yaw:+.1f} deg to put it on the centre line")
-    reach = max(r90, min(450.0, reach))
+            notes.append(f"{'free lane' if tgt != aim['bearing'] else 'box centre'} was {tgt:+.1f} deg off ({e * 100:+.0f} cm sideways): arm base yaw {yaw:+.1f} deg to put it there")
+    reach = max(r90, min(450.0 if on_floor else 435.0, reach))
     z_hi = 150.0 if on_floor else NEX_CARRY_Z_MM
     if not on_floor:
         await arm(160, z_hi)
@@ -1031,12 +1303,18 @@ async def place_on_top(robot, llm, surface_m: Optional[float] = None, object_h_m
     if not r.get("ok") and not on_floor:
         # 最高處伸不到這麼遠（手臂工作範圍）：每次降 3 cm 再試，降到「假設箱頂 + 6 cm」為止
         zz = z_hi
-        while not r.get("ok") and zz - 30.0 >= z_mm + 60.0:
+        while not r.get("ok") and zz - 30.0 >= z_mm + 35.0:      # 底部至少還在（假設的）箱頂上方 3 cm
             zz -= 30.0
             r = await arm(reach, zz, yaw)
         if r.get("ok"):
             notes.append(f"cannot reach {reach:.0f} mm at full height: went over the box at z {zz:.0f} mm")
             z_hi = zz
+    if r.get("ok") and rolled:
+        # 已經在放置點正上方、最高處：轉回直立（底部離箱頂還有 9 cm 以上），停穩再往下放
+        await robot.act("arm_to", {"x_mm": int(round(reach)), "y_mm": int(round(z_hi)), "pitch_deg": 0.0, "yaw_deg": round(float(yaw), 1), "roll_deg": 0.0})
+        await asyncio.sleep(1.0)
+        rolled = False
+        notes.append("over the spot: turned it upright again")
     if r.get("ok") and on_floor:
         r = await arm(reach, z_mm, yaw)
     elif r.get("ok"):
@@ -1048,14 +1326,32 @@ async def place_on_top(robot, llm, surface_m: Optional[float] = None, object_h_m
             m = re.search(r"z=(-?\d+)", str((res.get("real") or {}).get("message", "")) or str(res.get("message", "")))
             return float(m.group(1)) if m else None
         z_low = max(_nex_min_z(reach) if callable(globals().get("_nex_min_z")) else -70.0, (0.12 + grip - NEX_BASE_H_M) * 1000)
-        z_cmd, touched = z_hi, None
+        # 2026-11-17 o_h2：棒子鬆手後倒向夾爪。實體手臂回報：指令 195→165 時實際 195/187/180/172、俯仰 0→1.7°——
+        # 195 就頂到了，卻等「落後 7 mm」才停，多壓了三步，棒子被壓歪、一鬆手就彈倒。空中時實際高度固定比指令低 3–5 mm，
+        # 所以改看「跟空中那幾步的落後量相比」多了 4 mm 就算碰到，並退回上一步的高度（不壓著）再鬆手。
+        z_cmd, touched, air = z_hi, None, []
         while z_cmd - 10.0 >= z_low:
             z_cmd -= 10.0
             r = await arm(reach, z_cmd, yaw)
             zr = real_z(r)
-            if not r.get("ok") or (zr is not None and zr - z_cmd >= 7.0):
+            lag = None if zr is None else zr - z_cmd
+            base = sorted(air)[len(air) // 2] if len(air) >= 2 else None
+            # 18:5x o_h2：伸到 450 mm 時手臂自己下垂 10–14 mm（實際比指令「低」），server 回「沒到位」，被當成「碰到了」，
+            # 在箱頂上方 7 cm 就鬆手，棒子掉下去把白瓶子砸倒。碰到箱面是實際比指令「高」；沒到位但偏低 = 下垂，繼續降。
+            if (zr is None and not r.get("ok")) or (lag is not None and (lag >= 7.0 or (base is not None and lag - base >= 4.0))):
+                # 落後量自己就會抖 ±3 mm（11-17：空中 −8 → −3 被當成碰到，在箱頂上方 7 cm 鬆手）→ 要再確認一次：
+                # 再往下送 8 mm，實際高度有跟著降 4 mm 以上 = 剛才只是雜訊，繼續降；沒跟著降 = 真的頂到了。
+                if zr is not None and z_cmd - 8.0 >= z_low:
+                    r2 = await arm(reach, z_cmd - 8.0, yaw)
+                    zr2 = real_z(r2)
+                    if zr2 is not None and zr2 <= zr - 4.0:
+                        z_cmd -= 8.0
+                        continue
                 touched = zr if zr is not None else z_cmd + 10.0
+                await arm(reach, touched + 3.0, yaw)             # 放鬆：停在剛碰到的高度，不往下壓
                 break
+            if lag is not None:
+                air.append(lag)
             await asyncio.sleep(0.15)
         if touched is not None:
             top = touched / 1000.0 + NEX_BASE_H_M - grip
@@ -1090,6 +1386,13 @@ async def place_on_top(robot, llm, surface_m: Optional[float] = None, object_h_m
         jpg = await robot.frame()
         _save_frame(jpg, "place_on_top_check2")
         f = await perception.locate(llm, jpg, f"the {name} standing upright")
+    tipped = _looks_tipped(jpg, f) if f.found else False
+    missing = False
+    if held_hue is not None and not on_floor:
+        # 11-17：兩次都放在箱子前面的地上，模型卻回「看到它站在箱子上」（指到的是白瓶子）。有顏色的東西直接看畫面裡有沒有那個顏色的一大塊
+        cb = _color_base(jpg, held_hue, None)
+        bw, bh = getattr(_color_base, "last_wh", (0, 0)) if cb is not None else (0, 0)
+        missing = cb is None or bw * bh < 2500 or bh < 60
     await arm(200, z_hi)
     await robot.act("recenter_arm", {})
     still = held(await robot.state())
@@ -1097,11 +1400,40 @@ async def place_on_top(robot, llm, surface_m: Optional[float] = None, object_h_m
     notes.append(f"released at reach {reach:.0f} mm, base yaw {yaw:+.1f} deg")
     if still:
         return False, f"place_on_top [{'; '.join(notes)}]: opened the gripper but it still reports holding something."
+    if missing:
+        return False, (f"place_on_top [{'; '.join(notes)}]: released, but the camera does NOT see the {name} (its colour) on the box afterwards: "
+                       f"it probably fell off or landed on the floor. Not a success; look for it (survey_scene) and try again.")
+    if tipped:
+        return False, (f"place_on_top [{'; '.join(notes)}]: released, but the {name} is NOT standing: in the camera it is as wide as it is "
+                       f"tall (lying down or leaning on the gripper). Not a success; frame in runs/_skill_frames/.")
     if f.found:
         return True, (f"place_on_top [{'; '.join(notes)}]: released, the gripper is empty and the camera sees the {name} standing "
                       f"upright {'on the floor' if on_floor else 'on the box'}. The arm is back in the driving pose.")
     return False, (f"place_on_top [{'; '.join(notes)}]: released and the gripper is empty, but the camera could NOT confirm the {name} "
                    f"is standing upright (tipped over or fell off?). Not a success; frame in runs/_skill_frames/.")
+
+
+def _looks_tipped(jpg, found) -> bool:
+    """鬆手後的檢查（2026-11-17）：模型說「看到它站著」，實際是倒向夾爪、鏡頭只看到圓圓的頂端。有顏色的東西看色塊形狀：
+    又大、又圓、又實心（寬高差不多、填滿外框 65% 以上）= 倒下來對著鏡頭。只抓這一種倒法；紙箱跟橘色同色相，
+    色塊會連到箱子（形狀不圓、不實心）就不判；灰白色的東西圈不出來也不判（回 False）。"""
+    import cv2
+    import numpy as np
+    ref = _hue_ref(jpg, found.x, found.y)
+    if ref is None:
+        return False
+    img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    dh = np.abs(hsv[:, :, 0].astype(np.int16) - int(ref[0]))
+    mask = ((np.minimum(dh, 180 - dh) <= 8) & (hsv[:, :, 1] >= 150) & (hsv[:, :, 2] >= 60)).astype(np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    _, lab, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    h, w = mask.shape
+    k = lab[min(h - 1, int(found.y / 1000.0 * h)), min(w - 1, int(found.x / 1000.0 * w))]
+    if k == 0:
+        return False
+    bw, bh, area = (int(stats[k, c]) for c in (cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT, cv2.CC_STAT_AREA))
+    return bw >= 0.10 * w and 0.75 <= bh / float(bw) <= 1.35 and area >= 0.65 * bw * bh
 
 
 async def survey_scene(robot, llm) -> Tuple[bool, str]:
@@ -1190,10 +1522,11 @@ async def _move_exact(robot, fwd, right, tol=0.02, arm_low=False):
             if abs(v) <= tol:
                 continue
             if abs(v) < 0.09:
-                back = -0.12 if v > 0 else 0.12
-                await robot.act("move_chassis", {"forward_m": back if key == "forward_m" else 0, "right_m": back if key == "right_m" else 0,
-                                                 "turn_left_deg": 0, "push": bool(arm_low), "near_ok": True})
-                v -= back
+                # 2026-11-17（使用者：「原本對準了…移動底盤之後又偏移了」）：舊做法是「反向退 12 cm 再走 20 cm」，夾取前為了往前 8 cm
+                # 連做四五組來回，麥輪每次換向都滑一點，對好的左右就跑掉了。小步其實走得動（送 0.05–0.06，ToF 量到走了 2–7 cm），
+                # 不退了，直接送要走的距離，最少 5 cm。（我一度改成「÷0.72」：那是照動作訊息裡的 travelled 算的，它少報；
+                # 用 ToF 對照，送 0.10 實際走 96–112 mm，除了反而多走 3 cm 又退回來。）
+                v = math.copysign(max(0.05, abs(v)), v)
             await robot.act("move_chassis", {"forward_m": round(v, 3) if key == "forward_m" else 0,
                                              "right_m": round(v, 3) if key == "right_m" else 0, "turn_left_deg": 0, "push": bool(arm_low), "near_ok": True})
         await asyncio.sleep(0.5)
