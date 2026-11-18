@@ -83,18 +83,36 @@ class SimMirror(object):
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
+    def _connect(self):
+        """視窗版沒開就丟例外（0.5 秒內），連上後每個呼叫 3 秒逾時：視窗版中途關掉不會把這條執行緒永遠卡住。"""
+        import socket
+        import zmq
+        socket.create_connection(("127.0.0.1", int(self.port)), timeout=0.5).close()
+        c = RemoteAPIClient(port=self.port)
+        c.socket.setsockopt(zmq.RCVTIMEO, 3000)
+        c.socket.setsockopt(zmq.SNDTIMEO, 3000)
+        c.socket.setsockopt(zmq.LINGER, 0)
+        sim = c.require("sim")
+        return sim, NexArmSim._find_handles(sim)
+
     def _loop(self):
-        try:
-            sim = RemoteAPIClient(port=self.port).require("sim")
-            h = NexArmSim._find_handles(sim)
-        except Exception as e:
-            self.error = str(e)
-            print("[nexarm_sim] 數位分身連不上模擬器 %d：%s" % (self.port, e))
-            return
-        self.ok = True
-        print("[nexarm_sim] 數位分身：實體 NexArm 的動作會即時顯示在模擬器（zmq %d）" % self.port)
-        last = None
+        # 2026-11-17（使用者：「他要每次都能夠同步」）：原本只在啟動那一刻連一次，視窗版晚開或重開就整輪不同步。
+        # 改成一直重試：沒開 → 每 3 秒探一次；斷線 → 重連，並把目前的姿勢整個重送。
+        sim = h = last = None
+        told = False
         while not self._stop.is_set():
+            if sim is None:
+                try:
+                    sim, h = self._connect()
+                    self.ok, self.error, last, told = True, None, None, False
+                    print("[nexarm_sim] 數位分身：實體 NexArm 的動作會即時顯示在模擬器（zmq %d）" % self.port)
+                except Exception as e:
+                    self.ok, self.error = False, str(e)
+                    if not told:
+                        print("[nexarm_sim] 視窗版模擬器 %d 還沒開（%s）：開了會自動接上" % (self.port, str(e)[:60]))
+                        told = True
+                    time.sleep(3.0)
+                    continue
             try:
                 st = self.status_fn()
                 if st and st.get("servos") and st["servos"] != last:
@@ -102,8 +120,9 @@ class SimMirror(object):
                     set_model_joints(sim, h, q1, p1, p2, pitch, roll, claw_to_gap_mm(claw))
                     last = list(st["servos"])
             except Exception as e:
-                self.error = str(e)
-                print("[nexarm_sim] 數位分身更新失敗：%s（2 秒後重試）" % e)
+                self.ok, self.error = False, str(e)
+                print("[nexarm_sim] 數位分身更新失敗：%s（重連）" % str(e)[:80])
+                sim = None
                 time.sleep(2.0)
             time.sleep(1.0 / self.rate_hz)
 

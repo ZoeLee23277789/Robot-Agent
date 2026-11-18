@@ -42,7 +42,16 @@ def find_lift(sim, root):
 
 
 def connect(port):
-    sim = RemoteAPIClient(port=port).require("sim")
+    # 2026-11-17：視窗版關掉再開，舊連線的 recv() 永遠等不到回覆，整支程式從前一天卡到隔天、視窗裡的車不再動
+    # （start_office.sh 看到行程還在就說「已在跑」）。先用 TCP 探一下有沒有開，連線加 3 秒逾時：逾時就丟例外 → 主迴圈重連。
+    import socket
+    import zmq
+    socket.create_connection(("127.0.0.1", int(port)), timeout=0.5).close()
+    client = RemoteAPIClient(port=port)
+    client.socket.setsockopt(zmq.RCVTIMEO, 3000)
+    client.socket.setsockopt(zmq.SNDTIMEO, 3000)
+    client.socket.setsockopt(zmq.LINGER, 0)
+    sim = client.require("sim")
     root = find_robot(sim)
     return sim, root, find_lift(sim, root)
 

@@ -10,7 +10,9 @@ SIM_DIR="${COPPELIASIM_DIR:-$HOME/CoppeliaSim_Edu_V4_10_0_rev0_Ubuntu24_04}"
 SCENE="${OFFICE_SCENE:-scenes/Scan_2026_11_12.ttt}"
 export NEXARM_HOME="${NEXARM_HOME:-152,0,98,-40}" NEXARM_Z_MIN=-110 NEXARM_CLAW_OPEN=-90
 port_pid() { ss -ltnp 2>/dev/null | grep ":$1 " | sed 's/.*pid=\([0-9]*\).*/\1/' | head -1; }
-stop_port() { local p; p=$(port_pid "$1"); [ -n "$p" ] && kill "$p" && echo "關掉 $1 (pid $p)"; for i in $(seq 1 15); do [ -z "$(port_pid "$1")" ] && break; sleep 1; done; }
+stop_port() { local p; p=$(port_pid "$1"); [ -n "$p" ] && kill "$p" && echo "關掉 $1 (pid $p)"; for i in $(seq 1 30); do [ -z "$(port_pid "$1")" ] && break; sleep 1; done
+    # 模擬器關閉偶爾拖很久：埠沒放掉就開新的，新的會改佔 23001，被誤認成視窗版（11-17）
+    p=$(port_pid "$1"); [ -n "$p" ] && kill -9 "$p" && sleep 2; }
 stop_port 8765; stop_port 8767
 [ "$1" = "--stop" ] && exit 0
 
@@ -37,6 +39,14 @@ if sim.getSimulationState() != 0: sim.stopSimulation(); time.sleep(3)" 2>/dev/nu
     echo "沿用（模擬重置回起點）"
 fi
 
+# 2026-11-17（使用者：「我每次都要有開這個」）：視窗版沒開就自己開、載同一個場景。無視窗那台已經佔住 23000，視窗版會拿到 23001。
+if ! (echo > /dev/tcp/127.0.0.1/23001) 2>/dev/null; then
+    echo "== 2b. 視窗版 CoppeliaSim（23001，只看不跑：保持停止、不要存檔）=="
+    (cd "$SIM_DIR" && nohup ./coppeliaSim.sh "$SCENE" > /tmp/coppeliasim_gui.log 2>&1 < /dev/null &)
+    for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/23001) 2>/dev/null && break; sleep 2; done
+    (echo > /dev/tcp/127.0.0.1/23001) 2>/dev/null && echo "視窗版就緒" || echo "視窗版 60 秒內沒開起來（看 /tmp/coppeliasim_gui.log），先繼續，開起來後會自動同步"
+fi
+
 # 視窗版不會跟著重載場景：前幾輪實體 ToF 放的橘色方塊還留著，開新一輪前先掃掉
 (echo > /dev/tcp/127.0.0.1/23001) 2>/dev/null && timeout 20 ~/rmenv/bin/python -c "
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
@@ -46,8 +56,9 @@ if hs: sim.removeObjects(hs); print('視窗版清掉 %d 個舊障礙方塊' % le
 
 echo "== 3. 實體 server 8767 =="
 # 視窗版 CoppeliaSim（23001）有開的話：手臂關節同步到視窗版（--mirror-sim），底盤位姿由 sim_twin 複製（第 5 步）
+# 2026-11-17：不管視窗版現在有沒有開都接上（--mirror-sim 與 sim_twin 會自己等、自己重連），視窗版晚開、重開都會跟上
 GUI=0; (echo > /dev/tcp/127.0.0.1/23001) 2>/dev/null && GUI=1
-MS=(); [ "$GUI" = 1 ] && MS=(--mirror-sim 23001)
+MS=(--mirror-sim 23001)
 nohup env RM_CONN_TYPE=sta ROBOT_TOF_OFFSET_M=0.16 ~/rmenv/bin/python -u Test_Robot/robot_server.py --mode real --arm nexarm \
     --chassis-backend move --port 8767 --arm-port tcp://192.168.4.1:8080 "${MS[@]}" > /tmp/start_arm.log 2>&1 &
 for i in $(seq 1 45); do curl -s -m 2 http://127.0.0.1:8767/health 2>/dev/null | grep -q '"ok": *true' && break; sleep 2; done
@@ -61,12 +72,9 @@ curl -s -m 5 http://127.0.0.1:8765/state | ~/rmenv/bin/python -c "
 import sys, json; s = json.load(sys.stdin)
 print('模擬位置 %s｜實體位置 %s｜實體前方 %s mm｜實體電量 %s%%｜手臂 %s' % (s.get('world_xy'), s.get('real_world_xy'), s.get('real_tof_front_mm'), s.get('real_battery_percent'), {k: (s.get('arm_pose') or {}).get(k) for k in ('reach_mm', 'z_mm', 'pitch_deg')}))
 sys.exit(0 if 'real_tof_front_mm' in s else 1)" || { echo "!! 鏡射沒接上"; exit 1; }
-if [ "$GUI" = 1 ]; then
-    echo "== 5. 視窗版同步（sim_twin：底盤；手臂由 8767 同步）=="
-    if pgrep -f "tools/sim_twin.py" >/dev/null; then echo "已在跑"; else
-        nohup ~/rmenv/bin/python tools/sim_twin.py > /tmp/sim_twin.log 2>&1 < /dev/null & disown; echo "已啟動（視窗版保持「停止」，不要按播放）"
-    fi
-else
-    echo "(視窗版 CoppeliaSim 沒開：要看 3D 畫面就先開視窗版載同一個場景，再重跑這支腳本)"
-fi
+echo "== 5. 視窗版同步（sim_twin：底盤；手臂由 8767 同步）=="
+for p in $(pgrep -f "tools/sim_twin.py"); do kill "$p" 2>/dev/null; done      # 舊的可能卡住或連著已關掉的視窗：一律換新的
+nohup ~/rmenv/bin/python tools/sim_twin.py > /tmp/sim_twin.log 2>&1 < /dev/null & disown
+if [ "$GUI" = 1 ]; then echo "已啟動（視窗版保持「停止」，不要按播放）"
+else echo "視窗版 CoppeliaSim 還沒開：之後開起來、載入 $(basename "$SCENE") 就會自動同步，不用重跑這支腳本"; fi
 echo "== 好了：./run_office_tasks.sh ；即時畫面 http://127.0.0.1:8765/live =="
