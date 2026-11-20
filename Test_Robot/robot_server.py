@@ -3432,8 +3432,23 @@ class MockBackend(object):
 # HTTP 層
 # ============================================================================
 # agent 端每一步 POST /agent_event 進來的紀錄（任務、思考、評估、記憶、目標、動作與結果、規劃器建議），給 /live 顯示
-AGENT_LOG = {"task": None, "run_dir": None, "started": None, "steps": collections.deque(maxlen=80), "plans": collections.deque(maxlen=20), "done": None}
+AGENT_LOG = {"task": None, "run_dir": None, "started": None, "steps": collections.deque(maxlen=80), "plans": collections.deque(maxlen=20), "done": None,
+             "running": None}
 AGENT_LOG_LOCK = threading.Lock()
+# 2026-11-19（使用者：「為什麼他一直重複同一個動作 並且網頁東西沒有改」）：/live 的步驟要等那一步的動作全部做完才送進來，
+# 一個 pick_from_top 做五分鐘，網頁就五分鐘停在上一步。補兩樣即時的：agent 決定好動作就先送一筆 "running"（正在做哪一步、做了幾秒），
+# 以及 server 自己收到的每一個底層動作（arm_to、move_chassis…）與實際結果，最新 14 筆。只記在記憶體、不碰 zmq。
+ACTION_FEED = collections.deque(maxlen=14)
+ACTION_NOW = {"name": None, "params": None, "t0": None}
+
+
+def action_feed_add(name, params, result, t0):
+    real = result.get("real") or {}
+    msg = str(real.get("message") or result.get("message") or "")
+    with AGENT_LOG_LOCK:
+        ACTION_FEED.append({"t": time.strftime("%H:%M:%S", time.localtime(t0)), "name": name, "params": params,
+                            "ok": bool(result.get("ok")) and (bool(real.get("ok")) if real else True),
+                            "message": msg[:170], "dur": result.get("duration_s"), "seq": (ACTION_FEED[-1]["seq"] + 1) if ACTION_FEED else 1})
 
 
 def agent_event(ev):
@@ -3443,18 +3458,24 @@ def agent_event(ev):
             AGENT_LOG["task"], AGENT_LOG["run_dir"], AGENT_LOG["started"], AGENT_LOG["done"] = ev.get("task"), ev.get("run_dir"), time.time(), None
             AGENT_LOG["steps"].clear()
             AGENT_LOG["plans"].clear()
+            AGENT_LOG["running"] = None
+        elif kind == "running":
+            AGENT_LOG["running"] = dict(ev, t0=time.time())
         elif kind == "step":
             AGENT_LOG["steps"].append(ev)
+            AGENT_LOG["running"] = None
         elif kind == "plan":
             AGENT_LOG["plans"].append(ev)
         elif kind == "done":
             AGENT_LOG["done"] = ev
+            AGENT_LOG["running"] = None
 
 
 def agent_log_snapshot():
     with AGENT_LOG_LOCK:
         return {"task": AGENT_LOG["task"], "run_dir": AGENT_LOG["run_dir"], "started": AGENT_LOG["started"],
-                "steps": list(AGENT_LOG["steps"]), "plans": list(AGENT_LOG["plans"]), "done": AGENT_LOG["done"]}
+                "steps": list(AGENT_LOG["steps"]), "plans": list(AGENT_LOG["plans"]), "done": AGENT_LOG["done"],
+                "running": AGENT_LOG["running"], "feed": list(ACTION_FEED), "now": dict(ACTION_NOW), "t": time.time()}
 
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "robot_eval", "results")
@@ -3514,6 +3535,8 @@ table{border-collapse:collapse;width:100%}td{padding:1px 6px;vertical-align:top}
 #task{color:#fff;font-weight:bold;margin-bottom:6px}
 #plans{color:#fc9;margin-bottom:6px;max-height:130px;overflow:auto}#plans div{margin-bottom:4px}
 #steps{max-height:460px;overflow:auto;border-top:1px solid #444;padding-top:4px}
+#live{border-top:1px solid #444;margin-top:6px;padding-top:6px}#live .now{color:#fc9}#live .rep{color:#f88}
+#feed{max-height:230px;overflow:auto;color:#bbb}#feed div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .step{border-bottom:1px solid #3a3a3a;padding:6px 0}.step b{color:#9cf}.act{margin-left:14px}.err{color:#f88}
 .ov{transform:rotate(180deg)}
 #bsum{color:#fff;margin-bottom:6px}#btab{max-height:320px;overflow:auto}#btab td{border-bottom:1px solid #3a3a3a}.ok{color:#8f8}.bad{color:#f88}.run{color:#fc9}.pend{color:#777}#blog{color:#999;white-space:pre-wrap;margin-top:6px;max-height:140px;overflow:auto}
@@ -3526,7 +3549,8 @@ table{border-collapse:collapse;width:100%}td{padding:1px 6px;vertical-align:top}
   <div class="card" style="margin-top:10px"><h3>telemetry</h3><table id="st"><tr><td>loading...</td></tr></table></div>
 </div>
 <div class="card agent"><h3>batch results (robot_eval/results, newest run_batch.py batch)</h3><div id="bsum">no batch yet</div><div id="btab"></div><div id="blog"></div></div>
-<div class="card agent"><div id="task">task: (no agent running)</div><div id="plans"></div><div id="steps"></div></div>
+<div class="card agent"><div id="task">task: (no agent running)</div><div id="plans"></div><div id="steps"></div>
+<div id="live"><div id="run"></div><h3 style="margin-top:6px">robot actions as they happen (latest last; on a mirrored field the text is the real robot's answer)</h3><div id="feed"></div></div></div>
 </div>
 <script>
 const ms = parseInt(new URLSearchParams(location.search).get("ms") || "1000");
@@ -3565,6 +3589,7 @@ function simLink(){ const u = "http://" + location.hostname + ":8765/live"; retu
 let lastKey = "";
 function agent(){
   fetch("/agent_log").then(r => r.json()).then(d => {
+    live(d);
     const key = (d.task || "") + "|" + d.steps.length + "|" + (d.done ? 1 : 0) + "|" + d.plans.length;
     if (key === lastKey) return; lastKey = key;
     document.getElementById("task").textContent = "task: " + (d.task || "(no agent running)") + (d.done ? ("   → done(success=" + d.done.success + "): " + d.done.text) : "");
@@ -3581,6 +3606,32 @@ function agent(){
     }).join("");
     box.scrollTop = box.scrollHeight;
   }).catch(() => {});
+}
+let lastSeq = -1;
+function live(d){
+  // 正在做的那一步（agent 決定好就送來，不等做完）＋ server 正在執行的底層動作＋最近的底層動作與結果
+  const r = d.running, n = d.now || {}, feed = d.feed || [];
+  let h = "";
+  if (r) {
+    const acts = (r.actions || []).map(a => "<b>" + esc(a.name) + "</b>(" + esc(JSON.stringify(a.params)) + ")").join(", ");
+    h += "<div class='now'>⏳ step " + r.step + " running for " + Math.round(d.t - r.t0) + " s: " + acts + "</div>" +
+         "<div>🎯 <i>goal:</i> " + esc(r.next_goal) + "</div>";
+  }
+  if (n.name) h += "<div class='now'>▶ robot is doing <b>" + esc(n.name) + "</b>(" + esc(JSON.stringify(n.params)) + ") for " + Math.round(d.t - n.t0) + " s</div>";
+  // 同一個底盤指令連續送了好幾次 = 卡在重複同一件事（2026-11-19 那趟：橫移 3.2 cm 連送 23 次、車一步都沒動），直接標出來
+  const mv = feed.filter(f => f.name === "move_chassis");
+  let same = 0;
+  for (let i = mv.length - 1; i >= 0 && JSON.stringify(mv[i].params) === JSON.stringify(mv[mv.length - 1].params); i -= 1) same += 1;
+  const stuck = same >= 3 && /travelled 0\.0[01]m/.test(mv[mv.length - 1].message) && !mv[mv.length - 1].params.turn_left_deg;
+  if (stuck) h += "<div class='rep'>⚠ the chassis is not moving: the same command " + esc(JSON.stringify(mv[mv.length - 1].params)) + " was sent " + same + " times in a row; last answer: " + esc(mv[mv.length - 1].message) + "</div>";
+  document.getElementById("run").innerHTML = h;
+  const seq = feed.length ? feed[feed.length - 1].seq : 0;
+  if (seq === lastSeq) return; lastSeq = seq;
+  const fb = document.getElementById("feed");
+  // 一行放得下才看得到重點：參數只列非零的，底盤動作的回覆從「odometry: travelled …」開始顯示
+  const brief = p => Object.entries(p || {}).filter(([k, v]) => v !== 0 && v !== false && v != null).map(([k, v]) => k + "=" + (typeof v === "number" ? +v.toFixed(3) : v)).join(" ");
+  fb.innerHTML = feed.map(f => "<div>" + esc(f.t) + " " + (f.ok ? "✅" : "❌") + " <b>" + esc(f.name) + "</b>(" + esc(brief(f.params)) + ") " + (f.dur != null ? f.dur + "s" : "") + " → " + esc(String(f.message).replace(/^moved [^|]*\| /, "")) + "</div>").join("");
+  fb.scrollTop = fb.scrollHeight;
 }
 function batch(){
   fetch("/batch_status").then(r => r.json()).then(d => {
@@ -3747,12 +3798,16 @@ def make_handler(backend, token):
                 return self._send(409, {"ok": False, "message": "robot is busy with another action"})
             try:
                 t0 = time.time()
+                ACTION_NOW.update(name=name, params=params, t0=t0)
                 try:
                     result = backend.do(name, params)
                 except Exception as e:
                     backend.stop()  # 動作中途出例外，先讓底盤停下來
                     result = {"ok": False, "message": "%s: %s" % (type(e).__name__, e)}
+                finally:
+                    ACTION_NOW.update(name=None, params=None, t0=None)
                 result["duration_s"] = round(time.time() - t0, 2)
+                action_feed_add(name, params, result, t0)
                 print("[server] %s %s -> %s" % (name, json.dumps(params), result))
                 return self._send(200, result)
             finally:

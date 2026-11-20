@@ -33,11 +33,16 @@ def main():
     row, gap = skills_nexarm._find_park_row(jpg), skills_nexarm._gripper_gap_cv(jpg)
     xy = json.load(urllib.request.urlopen(U + "/state", timeout=5))["real_world_xy"]
     print("白點排", row, "夾爪", gap, "實體里程計", xy)
-    if row is None or gap is None:
-        print("!! 看不到一排白點或夾爪：沒有更動基準（檢查相機角度、白點有沒有被擋住）")
+    if row is None:
+        print("!! 看不到一排白點：沒有更動基準（檢查相機角度、白點有沒有被擋住）")
         return 1
+    if gap is None:
+        # 2026-11-19：相機今天比 11-16 朝上約 3°，俯視姿勢下夾爪的橫桿掉到畫面下緣外，只剩兩根指尖，影像法認不出夾爪。
+        # 白點那一排看得到就照存；少了夾爪位置只是不能補償「相機之後又被碰歪」，return_home 會直接用這張圖的白點位置。
+        print("!! 畫面裡看不到完整的夾爪：基準照存，但沒有夾爪位置，之後相機角度被動到就要重新校正")
     ref = {"row": True, "x": round(float(row[0]), 1), "y": round(float(row[1]), 1), "slope": round(float(row[2]), 4),
-           "forward_m": round(-xy[0], 3), "right_m": round(xy[1], 3), "gap_x": round(float(gap[0]), 1), "gap_y": round(float(gap[1]), 1)}
+           "forward_m": round(-xy[0], 3), "right_m": round(xy[1], 3),
+           "gap_x": None if gap is None else round(float(gap[0]), 1), "gap_y": None if gap is None else round(float(gap[1]), 1)}
     with open(skills_nexarm._HOME_DOT_FILE, "w", encoding="utf-8") as fh:
         json.dump(ref, fh)
     with open("runs/_home_dot_ref.jpg", "wb") as fh:

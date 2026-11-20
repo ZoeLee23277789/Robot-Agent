@@ -823,6 +823,10 @@ class RobotAgent:
                 for a in output.action[: self.max_actions_per_step]:
                     n, p = a.unpack()
                     print(f"   ▶ {n}({json.dumps(p, ensure_ascii=False)})")
+                # /live：動作可能做好幾分鐘（pick_from_top），做完才送那一步的話網頁會一直停在上一步 → 決定好就先送「正在做」
+                await self._post_event({
+                    "event": "running", "step": step, "next_goal": output.next_goal,
+                    "actions": [dict(zip(("name", "params"), a.unpack())) for a in output.action[: self.max_actions_per_step]]})
 
                 is_physical = any(a.unpack()[0] in PHYSICAL_ACTIONS for a in output.action)
                 if self.confirm_each_step and is_physical and not await self.confirm(output):
