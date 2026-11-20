@@ -33,6 +33,7 @@ from robot_agent.llm.messages import (
 from robot_agent import perception, skills, skills_nexarm
 from robot_agent.actions import ACTION_SPECS
 from robot_agent.client import RobotClient
+from robot_agent.llm_factory import estimate_cost
 from robot_agent.views import (
     ActionRecord,
     ActionResult,
@@ -117,6 +118,27 @@ AskHuman = Callable[[str], Awaitable[str]]
 Confirm = Callable[[RobotAgentOutput], Awaitable[bool]]
 
 
+class _MeteredLLM:
+    """交給感知／技能用的 LLM 包裝：每次 ainvoke 回來就把 usage 報給 on_usage，其他屬性原樣轉給真正的 llm。
+    perception.py 與 skills*.py 是直接呼叫 llm.ainvoke 的，之前這些呼叫完全沒算進 token 統計
+    （pick_from_top 對準一輪就指兩次，一個任務可以有十幾次帶圖的呼叫）。"""
+
+    def __init__(self, llm, on_usage):
+        self._llm = llm
+        self._on_usage = on_usage
+
+    def __getattr__(self, name):
+        return getattr(self._llm, name)
+
+    async def ainvoke(self, *args, **kwargs):
+        resp = await self._llm.ainvoke(*args, **kwargs)
+        try:
+            self._on_usage(resp)
+        except Exception:
+            pass
+        return resp
+
+
 async def _console_ask(question: str) -> str:
     print(f"\n🟡 Agent 想問你：{question}")
     return (await asyncio.to_thread(input, "👉 你的回答：")).strip() or "(no answer)"
@@ -154,6 +176,7 @@ class RobotAgent:
         self.task = task
         skills.set_task_context(task)   # 技能解析目標時可以回頭看整句任務（例如「from the table」）
         self.llm = llm
+        self.skill_llm = _MeteredLLM(llm, lambda resp: self._accumulate_usage(resp, perception=True))
         self.robot = robot
         # 視覺模型每指到一個目標，就把框送給 /live（見 perception.LOCK_HOOK）
         perception.LOCK_HOOK = lambda box, label: asyncio.ensure_future(robot.post_lock(box, label))
@@ -518,11 +541,11 @@ class RobotAgent:
         obj = str(params.get("object", "")).strip() or "target"
         t0 = time.time()
         try:
-            found = await perception.locate(self.llm, await self.robot.frame(), obj)
+            found = await perception.locate(self.skill_llm, await self.robot.frame(), obj)
             if not found.found:
                 # pointing 對小物體偶爾會漏判，同一個畫面重問一次的成本很低，先排除是不是看漏了
                 await asyncio.sleep(0.3)
-                retry = await perception.locate(self.llm, await self.robot.frame(), obj)
+                retry = await perception.locate(self.skill_llm, await self.robot.frame(), obj)
                 if retry.found:
                     found = retry
             msg = found.describe(obj)
@@ -535,7 +558,7 @@ class RobotAgent:
                     if not res.get("ok"):
                         msg += f" Turn failed: {res.get('message')}"
                         break
-                    again = await perception.locate(self.llm, await self.robot.frame(), obj)
+                    again = await perception.locate(self.skill_llm, await self.robot.frame(), obj)
                     msg += f" Turned {found.turn_left_deg:+.0f} deg (left positive)."
                     if not again.found:
                         msg += " After turning, the object is no longer visible (the turn may have overshot)."
@@ -569,7 +592,7 @@ class RobotAgent:
                 depth_png = await self.robot.overhead_depth()  # None 就沒有高度資訊，locate_overhead 會照舊運作
                 state = record.state_before or {}
                 found = await perception.locate_overhead(
-                    self.llm, jpg, obj, state.get("world_xy"), skills.pseudo_yaw(state), depth_png)
+                    self.skill_llm, jpg, obj, state.get("world_xy"), skills.pseudo_yaw(state), depth_png)
                 ok, msg = found.found, found.describe(obj)
         except Exception as e:
             ok, msg = False, f"perception failed: {type(e).__name__}: {' '.join(str(e).split())[:200]}"
@@ -589,7 +612,7 @@ class RobotAgent:
             else:
                 depth_png = await self.robot.overhead_depth()
                 state = record.state_before or {}
-                items, raw = await perception.survey_overhead(self.llm, jpg, cat, state.get("world_xy"), skills.pseudo_yaw(state),
+                items, raw = await perception.survey_overhead(self.skill_llm, jpg, cat, state.get("world_xy"), skills.pseudo_yaw(state),
                                                               depth_png, state.get("static_landmarks") or {})
                 if not items:
                     ok, msg = False, f"no {cat} visible in the overhead view ({raw[:120]})"
@@ -613,35 +636,35 @@ class RobotAgent:
                              counts_as_failure=False, resets_streak=True)
 
     async def _h_go_to(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills.go_to(self.robot, self.llm, str(params.get("target", ""))))
+        return await self._skill(name, skills.go_to(self.robot, self.skill_llm, str(params.get("target", ""))))
 
     async def _h_approach(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills.approach(self.robot, self.llm, str(params.get("object", "")),
+        return await self._skill(name, skills.approach(self.robot, self.skill_llm, str(params.get("object", "")),
                                                        float(params.get("stop_m", 0.4) or 0.4)))
 
     async def _h_pick(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills.pick(self.robot, self.llm, str(params.get("object", ""))))
+        return await self._skill(name, skills.pick(self.robot, self.skill_llm, str(params.get("object", ""))))
 
     async def _h_pick_from_top(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills_nexarm.pick_from_top(self.robot, self.llm, str(params.get("object", "")),
+        return await self._skill(name, skills_nexarm.pick_from_top(self.robot, self.skill_llm, str(params.get("object", "")),
                                                             params.get("surface_m"), params.get("object_h_m"),
                                                             params.get("depth_m")))
 
     async def _h_survey_scene(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills_nexarm.survey_scene(self.robot, self.llm))
+        return await self._skill(name, skills_nexarm.survey_scene(self.robot, self.skill_llm))
 
     async def _h_return_home(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills_nexarm.return_home(self.robot, self.llm))
+        return await self._skill(name, skills_nexarm.return_home(self.robot, self.skill_llm))
 
     async def _h_place_on_top(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills_nexarm.place_on_top(self.robot, self.llm, params.get("surface_m"), params.get("object_h_m"),
+        return await self._skill(name, skills_nexarm.place_on_top(self.robot, self.skill_llm, params.get("surface_m"), params.get("object_h_m"),
                                                            params.get("depth_m")))
 
     async def _h_place(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills.place(self.robot, self.llm, str(params.get("target", ""))))
+        return await self._skill(name, skills.place(self.robot, self.skill_llm, str(params.get("target", ""))))
 
     async def _h_drive_through(self, name: str, params: dict, record: StepRecord, index: int) -> ActionResult:
-        return await self._skill(name, skills.drive_through(self.robot, self.llm, str(params.get("structure", ""))))
+        return await self._skill(name, skills.drive_through(self.robot, self.skill_llm, str(params.get("structure", ""))))
 
     async def _skill(self, name: str, coro) -> ActionResult:
         """導航技能：伺服器端閉迴路執行（地圖 + A*），這裡只包裝結果。失敗算真的失敗（機器人到不了），
@@ -676,16 +699,17 @@ class RobotAgent:
                     found = skills.tunnel_axis_from_landmark(geo, state) if geo.get("ok") else None
                 if found is None:
                     found = await perception.locate_tunnel_axis(
-                        self.llm, jpg, obj, state.get("world_xy"), skills.pseudo_yaw(state))
+                        self.skill_llm, jpg, obj, state.get("world_xy"), skills.pseudo_yaw(state))
                 ok, msg = found.found, found.describe(obj)
         except Exception as e:
             ok, msg = False, f"perception failed: {type(e).__name__}: {' '.join(str(e).split())[:200]}"
         return ActionResult(ok=ok, message=msg, duration_s=round(time.time() - t0, 2),
                              counts_as_failure=False, resets_streak=True)
 
-    def _accumulate_usage(self, completion) -> None:
-        """真的用量，從每次 LLM 回應的 usage 欄位累加（主呼叫/planner/摘要都算），不是
-        _estimate_tokens 那種字元數/4 的粗估——那個只用來決定歷史該截到哪，從來不是真實用量。"""
+    def _accumulate_usage(self, completion, perception: bool = False) -> None:
+        """真的用量，從每次 LLM 回應的 usage 欄位累加（主呼叫/planner/摘要/感知與技能的指點都算），不是
+        _estimate_tokens 那種字元數/4 的粗估——那個只用來決定歷史該截到哪，從來不是真實用量。
+        perception=True 是感知／技能內部的呼叫（經 _MeteredLLM 進來），另外記一份小計。"""
         usage = getattr(completion, "usage", None)
         if usage is None:
             return
@@ -693,6 +717,9 @@ class RobotAgent:
         self.result.total_prompt_tokens += usage.prompt_tokens or 0
         self.result.total_completion_tokens += usage.completion_tokens or 0
         self.result.total_tokens += usage.total_tokens or 0
+        if perception:
+            self.result.perception_llm_calls += 1
+            self.result.perception_tokens += usage.total_tokens or 0
 
     async def _run_judge(self) -> None:
         """對應框架迴圈 agent/judge.py 的 _judge_trace：自評成功時，另外拿證據（整段過程取樣的
@@ -858,12 +885,21 @@ class RobotAgent:
         if self.result.final_result():
             print(f"📝 {self.result.final_result()}")
         if self.result.llm_calls:
-            print(f"📊 {self.result.llm_calls} 次 LLM 呼叫｜{self.result.total_prompt_tokens} prompt + "
-                  f"{self.result.total_completion_tokens} completion = {self.result.total_tokens} tokens")
+            line = (f"📊 {self.result.llm_calls} 次 LLM 呼叫｜{self.result.total_prompt_tokens} prompt + "
+                    f"{self.result.total_completion_tokens} completion = {self.result.total_tokens} tokens"
+                    f"（其中感知/技能 {self.result.perception_llm_calls} 次、{self.result.perception_tokens} tokens）")
+            if self.result.cost is not None:
+                line += f"｜約 {self.result.cost:.2f} {self.result.cost_currency}"
+            else:
+                line += "｜沒設單價（.env 的 ROBOT_PRICE_*），不換算金額"
+            print(line)
         return self.result
 
     def _save(self) -> None:
         self.result.latest_plan = self.latest_plan
         self.result.long_term_summary = self.long_term_summary
+        cost = estimate_cost(self.result.total_prompt_tokens, self.result.total_completion_tokens, self.result.total_tokens)
+        if cost is not None:
+            self.result.cost, self.result.cost_currency = round(cost[0], 4), cost[1]
         (self.run_dir / "history.json").write_text(
             self.result.model_dump_json(indent=2), encoding="utf-8")

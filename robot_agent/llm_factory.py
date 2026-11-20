@@ -32,6 +32,25 @@ DEFAULT_MODELS = {
 }
 
 
+def estimate_cost(prompt_tokens: int, completion_tokens: int, total_tokens: int) -> Optional[tuple[float, str]]:
+    """用 .env 裡的單價把 token 換成錢，回 (金額, 幣別)；沒設單價回 None（不猜價格：各家、各模型、各時期都不一樣）。
+    兩種設法擇一，都是「每一百萬 token 多少錢」：
+      ROBOT_PRICE_INPUT_PER_M + ROBOT_PRICE_OUTPUT_PER_M   官方定價頁的輸入／輸出單價（輸出含推理 token）
+      ROBOT_PRICE_PER_M                                    不分輸入輸出的平均單價：拿自己某個月的帳單 ÷ 那個月的總 token 得到
+    ROBOT_PRICE_CURRENCY 是顯示用的幣別（預設 TWD）。"""
+    currency = os.getenv("ROBOT_PRICE_CURRENCY", "TWD")
+    try:
+        p_in, p_out = os.getenv("ROBOT_PRICE_INPUT_PER_M"), os.getenv("ROBOT_PRICE_OUTPUT_PER_M")
+        if p_in and p_out:
+            return (prompt_tokens * float(p_in) + completion_tokens * float(p_out)) / 1e6, currency
+        blended = os.getenv("ROBOT_PRICE_PER_M")
+        if blended:
+            return total_tokens * float(blended) / 1e6, currency
+    except ValueError:
+        pass
+    return None
+
+
 def _need(env: str) -> str:
     value = os.getenv(env)
     if not value:

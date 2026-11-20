@@ -112,6 +112,12 @@ class RunResult(BaseModel):
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_tokens: int = 0
+    # 上面四個數字裡，有多少是感知／技能內部的指點呼叫（locate、俯視定位、pick_from_top 的對準…）；2026-11-20 之前這部分完全沒算進去
+    perception_llm_calls: int = 0
+    perception_tokens: int = 0
+    # 用 .env 的單價換算（llm_factory.estimate_cost）；沒設單價就是 None
+    cost: Optional[float] = None
+    cost_currency: str = ""
     judge_verdict: Optional[bool] = None
     judge_reasoning: str = ""
 
