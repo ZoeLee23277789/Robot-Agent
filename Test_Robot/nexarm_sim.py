@@ -17,6 +17,7 @@ robot_server.py 的 _nex_* 處理函式兩邊共用，agent 看不出差別。
 """
 
 import math
+import os
 import threading
 import time
 
@@ -29,8 +30,11 @@ from nexarm import (CLAW_CLOSE, CLAW_OPEN, COUNTS_PER_DEG, HOLD_SHORTFALL_DEG, H
 # 擬合的運動學（mm / 度），跟 nexarm_workspace.py、Env/add_nexarm.py 同一組
 AX, AZ, L1, L2, L3 = -0.12, 110.35, 227.45, 145.31, 129.79
 O1, O2, C = 80.79, -80.39, -0.04
-GAP_OPEN_MM, FINGER_T_MM = 35.0, 8.0     # Env/add_nexarm.py 的 GAP_OPEN / FINGER 厚度
-GRASP_MAX_DIM_M = 0.12                   # 比這個大的東西不當作可抓物件（桌子、桶子）
+# 2026-11-19 使用者量實體：夾爪開到底（claw −90）兩指內緣 5 cm。原本照 Env/add_nexarm.py 模型的掌寬寫 35 mm，
+# 遊戲區 6–7 cm 的物件一個都夾不起來（實體也夾不起來，所以 NexArm 版場景的物件另外縮到 4.5 cm，見 Env/shrink_for_nexarm.py）。
+GAP_OPEN_MM, FINGER_T_MM = float(os.environ.get("NEXARM_GAP_OPEN_MM", "50")), 8.0
+CLAW_FULL_OPEN = -90.0                   # 開口對應到的夾爪角度；韌體預設的 CLAW_OPEN（−60）只開到約 39 mm，夾不進 5 cm 的棍子
+GRASP_MAX_DIM_M = 0.25                   # 最長邊比這個大的東西不當作可抓物件（桌子、桶子、泡棉方塊）；夾不夾得住看最短邊跟開口
 STEP_HZ = 25                             # 關節插值頻率
 
 
@@ -131,12 +135,12 @@ class SimMirror(object):
 
 
 def claw_to_gap_mm(claw):
-    """夾爪角度 → 兩指內緣距離。實體 −60 全開、50 全合，中間當線性（TODO 實體量幾個點）。"""
-    return max(0.0, min(GAP_OPEN_MM, GAP_OPEN_MM * (CLAW_CLOSE - claw) / (CLAW_CLOSE - CLAW_OPEN)))
+    """夾爪角度 → 兩指內緣距離。實體 −90 開到底 5 cm、50 全合，中間當線性（TODO 實體量幾個點）。"""
+    return max(0.0, min(GAP_OPEN_MM, GAP_OPEN_MM * (CLAW_CLOSE - claw) / (CLAW_CLOSE - CLAW_FULL_OPEN)))
 
 
 def gap_mm_to_claw(gap):
-    return CLAW_CLOSE - (CLAW_CLOSE - CLAW_OPEN) * max(0.0, min(GAP_OPEN_MM, gap)) / GAP_OPEN_MM
+    return CLAW_CLOSE - (CLAW_CLOSE - CLAW_FULL_OPEN) * max(0.0, min(GAP_OPEN_MM, gap)) / GAP_OPEN_MM
 
 
 class NexArmSim(object):
@@ -361,8 +365,8 @@ class NexArmSim(object):
 
     # ---- 抓取：掛接 ----
     def _grasp_candidates(self):
-        """場景裡可抓的東西：動態、會碰撞、最長邊 ≤ 12 cm、不在機器人身上。結果快取 20 秒：
-        604 個形狀每個問 9 次要 9 秒（第一版實測），物件清單不常變，每次只需要重新問位置。回 {handle: 最短邊 mm}。"""
+        """場景裡可抓的東西：動態、會碰撞、最長邊 ≤ 25 cm、不在機器人身上。結果快取 20 秒：
+        604 個形狀每個問 9 次要 9 秒（第一版實測），物件清單不常變，每次只需要重新問位置。回 {handle: (最短邊 mm, 最長邊 m)}。"""
         now = time.time()
         cache = getattr(self, "_cand_cache", None)
         if cache is not None and now - cache[0] < 20.0:
@@ -382,7 +386,7 @@ class NexArmSim(object):
                 continue
             dims = [b - a for a, b in zip(mn, mx)]
             if max(dims) <= GRASP_MAX_DIM_M:
-                out[sh] = min(dims) * 1000.0
+                out[sh] = (min(dims) * 1000.0, max(dims))
         self._cand_cache = (now, out)
         return out
 
@@ -391,13 +395,14 @@ class NexArmSim(object):
         sim, h = self.sim, self._h
         tcp_x = L3 / 1000.0 - 0.05
         best = None
-        for sh, width in self._grasp_candidates().items():
+        for sh, (width, longest) in self._grasp_candidates().items():
             try:
                 p = sim.getObjectPosition(sh, h["gripper"])      # 夾爪座標：x 前、y 上、z 側向
             except Exception:
                 self._cand_cache = None                            # 物件被刪了，下次重建清單
                 continue
-            if abs(p[0] - tcp_x) <= 0.035 and abs(p[1]) <= 0.03 and abs(p[2]) <= GAP_OPEN_MM / 2000.0:
+            # 上下容許：細長的東西（15 cm 積木、20 cm 瓶子）夾在身上哪一段都算夾到，不必剛好對到中心；球維持 ±3 cm
+            if abs(p[0] - tcp_x) <= 0.035 and abs(p[1]) <= max(0.03, longest / 2.0 - 0.015) and abs(p[2]) <= GAP_OPEN_MM / 2000.0:
                 d = abs(p[0] - tcp_x) + abs(p[2])
                 if best is None or d < best[0]:
                     best = (d, sh, width)

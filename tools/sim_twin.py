@@ -41,6 +41,27 @@ def find_lift(sim, root):
         return -1
 
 
+def find_arm(sim, root):
+    """NexArm 的五個關節加兩根手指（Env/add_nexarm.py 的模型）；場景裡沒有就回 None。"""
+    hs = [sim.getObject("./nexarm_" + n, {"proxy": root, "noError": True}) for n in ("j1", "j2", "j3", "j4", "j5", "fj_l", "fj_r")]
+    return None if -1 in hs else hs
+
+
+def find_movables(sim, root):
+    """場景裡會動的小東西（球、積木、垃圾）：非靜態、不在機器人身上的形狀，{別名: handle}。別名重複的不收（兩邊對不上）。
+    要在物件還沒被夾起來時建：被夾住的物件掛在夾爪底下，會被當成機器人的一部分。"""
+    robot_tree = set(sim.getObjectsInTree(root, sim.handle_all, 0))
+    out, dup = {}, set()
+    for sh in sim.getObjectsInTree(sim.handle_scene, sim.object_shape_type, 0):
+        if sh in robot_tree or sim.getObjectInt32Param(sh, sim.shapeintparam_static):
+            continue
+        name = sim.getObjectAlias(sh)
+        if name in out:
+            dup.add(name)
+        out[name] = sh
+    return {k: v for k, v in out.items() if k not in dup}
+
+
 def connect(port):
     # 2026-11-17：視窗版關掉再開，舊連線的 recv() 永遠等不到回覆，整支程式從前一天卡到隔天、視窗裡的車不再動
     # （start_office.sh 看到行程還在就說「已在跑」）。先用 TCP 探一下有沒有開，連線加 3 秒逾時：逾時就丟例外 → 主迴圈重連。
@@ -252,11 +273,16 @@ def main():
                     help="explore 模式：來源改成實體 server（例如 http://127.0.0.1:8767）的里程計與 ToF 地圖，不連 --src")
     ap.add_argument("--hz", type=float, default=10.0)
     ap.add_argument("--no-map", action="store_true", help="--real 時不要把 server 的占據格畫成方塊（場景已是手機掃描建的 Scan_*.ttt 時用）")
+    ap.add_argument("--full", action="store_true",
+                    help="純模擬（沒有實體在同步手臂）時用：連 NexArm 的關節、場景裡會動的小物件也一起複製，視窗版要載跟無視窗同一個場景")
     a = ap.parse_args()
     if a.real:
         return main_real(a)
     src = dst = None
     fov = None
+    arms = objs = None
+    last_objs = 0.0
+    obj_seen = {}
     warned_running = False
     last_ok = 0.0
     while True:
@@ -269,6 +295,15 @@ def main():
                 print("[sim_twin] 目標 %d：RoboMaster handle %d" % (a.dst, dst[1]), flush=True)
                 fov = FovOverlay(dst[0], dst[1])
                 print("[sim_twin] 前鏡頭視野錐：%s" % ("有畫" if fov.h != -1 else "找不到 Vision_sensor，不畫"), flush=True)
+                arms = objs = None
+            if a.full and arms is None:
+                sa, da = find_arm(src[0], src[1]), find_arm(dst[0], dst[1])
+                arms = list(zip(sa, da)) if sa and da else []
+                sm, dm = find_movables(src[0], src[1]), find_movables(dst[0], dst[1])
+                objs = [(sm[k], dm[k]) for k in sm if k in dm]
+                obj_seen = {}
+                print("[sim_twin] --full：手臂關節 %s，會動的物件 %d 個（來源 %d、視窗 %d）" % (
+                    "有接" if arms else "兩邊沒有都裝 NexArm，不複製", len(objs), len(sm), len(dm)), flush=True)
             ssim, sroot, slift = src
             dsim, droot, dlift = dst
             if dsim.getSimulationState() != 0:
@@ -282,6 +317,17 @@ def main():
             dsim.setObjectMatrix(droot, dsim.handle_world, m)
             if slift != -1 and dlift != -1:
                 dsim.setJointPosition(dlift, ssim.getJointPosition(slift))
+            if arms:
+                for sj, dj in arms:
+                    dsim.setJointPosition(dj, ssim.getJointPosition(sj))
+            if objs and time.time() - last_objs > 0.5:   # 物件一秒兩次就夠看，而且只搬有動的：每個呼叫都會佔到無視窗那台的模擬迴圈
+                last_objs = time.time()
+                for so, do in objs:
+                    p = ssim.getObjectPose(so, ssim.handle_world)
+                    q = obj_seen.get(so)
+                    if q is None or max(abs(x - y) for x, y in zip(p, q)) > 1e-3:
+                        dsim.setObjectPose(do, p, dsim.handle_world)
+                        obj_seen[so] = p
             fov.update()
             if time.time() - last_ok > 30:
                 print("[sim_twin] 同步中：底盤 (%.2f, %.2f)" % (m[3], m[7]), flush=True)
@@ -293,6 +339,7 @@ def main():
             print("[sim_twin] %s：%s，2 秒後重連" % (type(e).__name__, str(e)[:120]), flush=True)
             src = dst = None
             fov = None
+            arms = objs = None
             time.sleep(2.0)
 
 

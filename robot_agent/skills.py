@@ -741,6 +741,10 @@ async def pick(robot, llm, obj: str) -> Tuple[bool, str]:
     升降柱（Env/add_arm_lift.py）：前方距離感測器掛在升降座上、跟夾爪一起升，所以升到桌面高度之後，送進指間的幾何跟在地上
     完全一樣，下面的流程一步都不用改；結束時不管成敗都降回 0（重心低、感測器回到底盤高度才適合開車）。"""
     _st0 = await robot.state()
+    if "arm_pose" in _st0 and _st0.get("mode") == "sim" and "real_tof_front_mm" not in _st0:
+        # 模擬裡裝的是 NexArm（2026-11-19）：下面整套是照 EP 原廠手臂校的，換手臂後夾不到還會誤判夾到，改走 NexArm 自己的幾何
+        from robot_agent import skills_nexarm
+        return await skills_nexarm.pick_sim(robot, llm, obj)
     if "real_tof_front_mm" in _st0 and "arm_pose" in _st0:
         # 2026-11-14：實體場地（鏡射 + NexArm）上舊的 pick 會頂著箱子開、把東西推倒；prompt 禁止了 agent 還是會退回來用，這裡直接擋
         return False, (f"pick({obj}): not available on the real field with the NexArm (it drives into the box and knocks things over). "
@@ -950,6 +954,10 @@ async def _pick_at_height(robot, obj: str, where: str, lift_mm: int, target_xy=N
 async def place(robot, llm, target: str) -> Tuple[bool, str]:
     """把手上的物件放到目標：收納箱 → 手臂抬高伸過桶緣再張開；桌子 → 升降柱升到桌面高度、前進到桌緣、低位張開；
     地墊/地面/其他 → 手臂放低再張開。"""
+    _st0 = await robot.state()
+    if "arm_pose" in _st0 and _st0.get("mode") == "sim" and "real_tof_front_mm" not in _st0:
+        from robot_agent import skills_nexarm
+        return await skills_nexarm.place_sim(robot, llm, target)
     xy, kind, note, surface = await resolve_target(robot, llm, target)
     if kind == "front":
         return False, f"place({target}): 'in front of me' only makes sense for pick; give a landmark, an object description or coordinates"

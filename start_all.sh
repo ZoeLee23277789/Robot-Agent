@@ -14,6 +14,9 @@ set -e
 cd "$(dirname "$0")"
 
 SERVER_URL="http://127.0.0.1:8765"
+# 場景裡裝的是 NexArm 時（Capstone_Playground_nexarm.ttt），模擬的手臂跟實體用同一組設定（start_office.sh）：夾爪開到底（5 cm）、
+# 車頭前方可以降到接近地板。原廠手臂的場景不讀這兩個變數。2026-11-19：沒帶的時候手臂最低只到離地 19 cm，地上的東西全都碰不到。
+export NEXARM_Z_MIN="${NEXARM_Z_MIN:--110}" NEXARM_CLAW_OPEN="${NEXARM_CLAW_OPEN:--90}"
 LOG="/tmp/robot_server.log"
 # 只比對真正的啟動命令「python -u [Test_Robot/]robot_server.py」，不要用裸的 "robot_server.py"：
 # pkill -f 比對的是整條命令列，裸字串會連 vim robot_server.py、tail -f /tmp/robot_server.log、
