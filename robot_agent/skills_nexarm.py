@@ -634,12 +634,18 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes, a
         # 2026-11-17：這裡原本用 _move_exact（看里程計補到 2 cm 內）。實體小步本來就差 ±3 cm（同樣送 0.10，ToF 量到走了 96–112 mm；
         # 送 0.05–0.06 走了 20–67 mm），補正只會前後來回晃、把對好的左右晃掉。這個迴圈每一步都會重看畫面，所以改成「看一次、動一次」。
         await arm(r0, 150, 0.0, yaw)
+        st_a = await robot.state()
         res = await robot.act("move_chassis", {"forward_m": round(float(fwd), 3), "right_m": round(float(right), 3), "turn_left_deg": 0,
                                                "push": False, "near_ok": True})
         await asyncio.sleep(0.5)
         if z_mm < 60:
             await arm(r0, 60, gp, yaw)             # 分兩段降：一次從 150 降到夾取高度，夾爪會往前甩一段弧
         await arm(r0, z_mm, gp, yaw)
+        # 實際走了多少：動作回覆裡的 travelled 是剛停那一刻的值，少報兩三成；手臂降完（底盤停穩）之後看里程計前後差才準
+        st_b = await robot.state()
+        pa, pb = st_a.get("real_world_xy"), st_b.get("real_world_xy")
+        if isinstance(pa, (list, tuple)) and isinstance(pb, (list, tuple)):
+            return math.hypot(pb[0] - pa[0], pb[1] - pa[1])
         return _real_travel_m(res)
 
     seen_close, log, blind = False, [], 0
@@ -672,8 +678,19 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes, a
             return g
         py = gref["y"] - 3.8 * (r_cur - gref["r"])
         if abs(gx - gref["x"]) > 30.0 or abs(gy - py) > 60.0:
+            # 2026-11-20 實機：第一張（手臂剛降到位）量到 (553,808)，之後每一張都是 (569,641–655)——錯的是第一張，
+            # 卻被當成基準，把後面對的讀值全部蓋掉，指尖線差了 160 單位，手臂以為還很遠一路伸到 440。
+            # 被退掉的讀值如果連兩張彼此一致（換算回同一個前伸量之後 x 差 15、y 差 30 以內），就是基準錯了：改用它們。
+            cand = (gx, gy + 3.8 * (r_cur - gref["r"]))
+            prev = gref.get("alt")
+            gref["alt"] = cand
+            if prev is not None and abs(prev[0] - cand[0]) <= 15.0 and abs(prev[1] - cand[1]) <= 30.0:
+                gref.update(x=gx, y=gy, r=r_cur, alt=None)
+                log.append(f"[gripper reference corrected to {gx:.0f},{gy:.0f}]")
+                return g
             log.append(f"[gripper misread at {gx:.0f},{gy:.0f}: using {gref['x']:.0f},{py:.0f}]")
             return (gref["x"], py)
+        gref["alt"] = None
         gref.update(x=0.7 * gref["x"] + 0.3 * gx, y=gy, r=r_cur)
         return g
 
@@ -809,9 +826,19 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes, a
             if adv >= 0.03:        # 不到 3 cm 就不補：手臂自己伸得到，而底盤最小步的誤差（±2.5 cm）比要補的還大
                 # 2026-11-19：最少送 6 cm（原 4 cm）。那趟送 4 cm 底盤完全沒動（里程計 0.00 m），結果手臂伸到 427 mm 才夾到；
                 # 送 5–6 cm 實際走 3–4 cm。
-                moved = await chassis(max(0.06, adv), 0.0)
-                log.append(f"final chassis step {max(0.06, adv) * 100:.0f} cm with the arm lifted"
-                           + (f" (the chassis really moved {moved * 100:.0f} cm)" if moved is not None else "") + ": now only the arm moves")
+                # 2026-11-20：這一步送 6 cm 實際只走 3 cm，剩下的全靠手臂伸，伸到 448 mm（極限）才用指尖夾到；之後把它水平拉回來重夾，
+                # 棒子被拉歪，放到箱頂一鬆手就倒（錄影 #411）。走不夠就再補一步（最多兩步），補到離目標 2.5 cm 內。
+                total, n_step = 0.0, 0
+                for _k in range(2):
+                    need = adv - total
+                    if _k > 0 and need < 0.025:
+                        break
+                    moved = await chassis(max(0.06, need), 0.0)
+                    n_step += 1
+                    if moved is None:
+                        break
+                    total += moved
+                log.append(f"final chassis step with the arm lifted: wanted {adv * 100:.0f} cm, the chassis moved {total * 100:.0f} cm in {n_step} step(s): now only the arm moves")
                 continue
         if dy <= 35:      # 以前還要求 frac 是 None：實測棒子完全在指間時 frac 也只有 0.2（底部被橫桿擋住），等 0.45 等不到，手臂就一直往前伸、把棒子在地上推著走
             break
@@ -831,6 +858,53 @@ async def _close_in_by_sight(robot, llm, label, arm, r0, z_mm, gp, yaw, notes, a
     return yaw, None, r_cur
 
 
+_COLOR_HUES = {"orange": [(8, 26)], "red": [(0, 7), (172, 180)], "yellow": [(24, 35)], "green": [(40, 85)], "blue": [(95, 130)],
+               "purple": [(125, 150)], "pink": [(150, 172)]}
+
+
+def _color_named_blob(jpg, label):
+    """名字裡有顏色的直立小物件，直接用顏色在畫面裡找：回它底部的 (x, y)/1000，找不到回 None。
+    2026-11-20：橘色棒子立在 1.5–2 m 外的牆邊，轉一圈有兩張畫面拍到它（14×40 px），視覺模型兩張都回「沒看到」，
+    agent 就回報「地上沒有橘色棒子」。小又遠的東西模型常漏，顏色鮮豔的直立細長塊用顏色找很穩。
+    只收：夠鮮豔（紙箱、皮椅的色相一樣但不夠鮮豔或不是細長的）、高是寬的 1.5 倍以上、寬 ≤ 60 px、面積 ≥ 120 px。"""
+    import cv2
+    import numpy as np
+    ranges = next((v for k, v in _COLOR_HUES.items() if k in str(label).lower()), None)
+    if ranges is None or not jpg:
+        return None
+    img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hue = np.zeros((h, w), bool)
+    for lo, hi in ranges:
+        hue |= (hsv[:, :, 0] >= lo) & (hsv[:, :, 0] <= hi)
+    # 飽和度 ≥ 205：棒子的色塊中位數 250–255；紙箱、白瓶子上的橘色商標只有 172–204（同一批畫面量的）
+    m = (hue & (hsv[:, :, 1] >= 205) & (hsv[:, :, 2] >= 110)).astype(np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, _lab, st, _cen = cv2.connectedComponentsWithStats(m, 8)
+    best = None
+    for k in range(1, n):
+        x0, y0, bw, bh, a = (int(v) for v in st[k, :5])
+        if a >= 120 and bw <= 60 and bh >= 1.5 * bw and (best is None or a > best[0]):
+            best = (a, (x0 + bw / 2.0) / w * 1000.0, (y0 + bh - 1) / h * 1000.0)
+    return (best[1], best[2]) if best else None
+
+
+async def _locate_floor(llm, jpg, label):
+    """找立在地上的東西（底部的位置）：先問視覺模型（底部 → 整個），都說沒有再用顏色找（_color_named_blob）。"""
+    f = await perception.locate(llm, jpg, f"the bottom end of the {label}, where it touches the floor")
+    if not f.found:
+        f = await perception.locate(llm, jpg, f"{label} standing on the floor")
+    if not f.found:
+        cb = _color_named_blob(jpg, label)
+        if cb is not None:
+            return perception.Located(found=True, x=int(round(cb[0])), y=int(round(cb[1])),
+                                      bearing_right_deg=round(_bearing(cb[0]), 1), label=label, raw="found by colour")
+    return f
+
+
 async def _servo_to_floor_object(robot, llm, label, notes):
     """地上的細東西 ToF 掃不到 → 跟回家看白點同一招：相機轉到俯視姿勢 (380,120)，把物件底部對到「夾爪開口正上方」的固定偏移
     （= 車中心正前方 0.73 m），再用里程計往前走到物件在手臂底座前 0.42 m。回 None = 到位；字串 = 失敗原因。"""
@@ -843,7 +917,7 @@ async def _servo_to_floor_object(robot, llm, label, notes):
         await robot.frame()
         jpg = await robot.frame()
         _save_frame(jpg, f"floor_face_{k+1}")
-        f = await perception.locate(llm, jpg, f"{label} standing on the floor")
+        f = await _locate_floor(llm, jpg, label)
         if f.found:
             seen = True
             if abs(_bearing(f.x)) <= 5.0:
@@ -873,9 +947,7 @@ async def _servo_to_floor_object(robot, llm, label, notes):
             await robot.frame()
             jpg = await robot.frame()
             _save_frame(jpg, "floor_drive")
-            f = await perception.locate(llm, jpg, f"the bottom end of the {label}, where it touches the floor")
-            if not f.found:
-                f = await perception.locate(llm, jpg, f"{label} standing on the floor")
+            f = await _locate_floor(llm, jpg, label)
             if not f.found or f.y >= 820:
                 break
             if abs(_bearing(f.x)) > 5.0:
@@ -892,9 +964,7 @@ async def _servo_to_floor_object(robot, llm, label, notes):
         await robot.frame()
         jpg = await robot.frame()
         _save_frame(jpg, f"floor_servo_{i+1}")
-        f = await perception.locate(llm, jpg, what)
-        if not f.found:
-            f = await perception.locate(llm, jpg, f"{label} standing on the floor")
+        f = await _locate_floor(llm, jpg, label)
         if not f.found:
             # 俯視看不到：車頭已經對著它，不是太遠（在畫面上緣外）就是太近（被夾爪擋住）。前幾次當成太遠往前 0.3 m，之後退 0.4 m
             for step in ((0.3, 0.3, -0.4) if i == 0 else (-0.25,)):
@@ -902,9 +972,7 @@ async def _servo_to_floor_object(robot, llm, label, notes):
                 await asyncio.sleep(0.8)
                 await robot.frame()
                 jpg = await robot.frame()
-                f = await perception.locate(llm, jpg, what)
-                if not f.found:
-                    f = await perception.locate(llm, jpg, f"{label} standing on the floor")
+                f = await _locate_floor(llm, jpg, label)
                 if f.found:
                     break
         if not f.found:
@@ -1809,7 +1877,7 @@ async def survey_scene(robot, llm) -> Tuple[bool, str]:
     floor = [i["label"] for i in items if "floor" in i["where"]]
     other = [i["label"] for i in items if "box" not in i["where"] and "floor" not in i["where"]]
     msg = (f"survey_scene (front camera looking down): ON THE BOX: {', '.join(on_box) if on_box else 'nothing'}. "
-           f"ON THE FLOOR (not on the box): {', '.join(floor) if floor else 'nothing'}."
+           f"ON THE FLOOR (not on the box): {', '.join(floor) if floor else 'nothing seen in this one view (that is not proof: if the task names something on the floor, call pick_from_top with surface_m=0 anyway, it turns and searches)'}."
            + (f" Elsewhere: {', '.join(other)}." if other else "")
            + " Things ON THE BOX are grasped with pick_from_top('<label>'). Things standing ON THE FLOOR can be grasped too if they are at least 12 cm tall: pick_from_top('<label>', surface_m=0)."
            + (" NOTE: you are closer than 0.6 m, part of the box may be out of view; survey from about 1 m for a full list."

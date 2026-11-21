@@ -750,7 +750,10 @@ async def locate(llm, jpg: Optional[bytes], obj: str) -> Located:
 
 SURVEY_FRONT_PROMPT = (
     'This photo is taken by a small robot looking forward and slightly down. There is a cardboard box on the floor. '
-    'List EVERY separate small object you can see near it (do not list the box itself, furniture, the robot\'s own black '
+    # 2026-11-20：原本寫「near it」，立在箱子右邊 70 cm 地上的橘色棒子不算「附近」，同一張畫面問四次都沒列出來，
+    # agent 就回報「地上沒有橘色棒子」直接結束。改成箱子上和整個畫面的地板都要列（同一張畫面 4/4 都列出來了）。
+    'List EVERY separate small object you can see on the box AND anywhere on the floor in the photo, including ones far to '
+    'the left or right of the box (do not list the box itself, furniture, the robot\'s own black '
     'gripper, or stickers/markers on the floor). For each one say where it STANDS: "on the box" only if it rests on the top '
     'face of the cardboard box; "on the floor" if it stands on the floor beside or in front of the box; "elsewhere" otherwise. '
     'Look carefully at what is under each object. Answer ONLY with JSON: '

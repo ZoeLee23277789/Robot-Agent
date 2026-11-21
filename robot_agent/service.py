@@ -464,6 +464,18 @@ class RobotAgent:
         if index > 0:  # done 必須單獨一步，前面的動作結果還沒被看過
             return ActionResult(
                 ok=False, message="done ignored: it must be the only action in its step, so you can verify first")
+        if not bool(params.get("success")) and not getattr(self, "_giveup_checked", False):
+            # 2026-11-20 實體 o_h2：survey_scene 只看正前方那一個角度，棒子立在右邊牆邊沒入鏡，agent 就回報「地上沒有橘色棒子」直接結束
+            # （訊息裡已經寫了「這不代表沒有、請照樣呼叫 pick_from_top」，三次裡還是有兩次不理）。
+            # 用過 survey_scene、卻一次夾取都沒試過就要宣告失敗：擋一次，叫它先去找。
+            names = [a.name for st in self.result.steps for a in st.actions] + [a.name for a in record.actions]
+            if "survey_scene" in names and not any(n in ("pick_from_top", "pick") for n in names):
+                self._giveup_checked = True
+                return ActionResult(
+                    ok=False, message="done(success=false) refused: you have not searched yet. survey_scene only sees what is straight "
+                    "ahead of the robot; an object on the floor to the side or behind is not in that view. Call "
+                    "pick_from_top('<the object named in the task>', surface_m=0) now: it turns the robot all the way around, finds "
+                    "the object on the floor and picks it up. Only give up after that fails.")
         self.result.is_done = True
         self.result.success = bool(params.get("success"))
         self.result.final_text = str(params.get("text", ""))
