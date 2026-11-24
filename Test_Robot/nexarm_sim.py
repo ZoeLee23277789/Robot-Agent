@@ -160,6 +160,7 @@ class NexArmSim(object):
         self._thread.start()
         if not self.wait_status(3.0):
             raise RuntimeError("模擬器裡的 NexArm 3 秒內讀不到狀態")
+        self._restore_leftover()
         t0 = time.time()
         n = len(self._grasp_candidates())    # 先建好可抓物件清單，第一次合爪才不用等 4 秒
         print("[nexarm_sim] 場景裡 %d 個可抓的動態小物件（%.1fs）" % (n, time.time() - t0))
@@ -364,6 +365,42 @@ class NexArmSim(object):
         return r
 
     # ---- 抓取：掛接 ----
+    def _held_file(self):
+        return "/tmp/nexarm_sim_held_%d.json" % self.port
+
+    def _restore_leftover(self):
+        """上一輪夾著東西就結束（任務做完沒放下、server 被重開）：模擬停止時 CoppeliaSim 會把物件的位置與父物件還原，
+        但「靜態」這個旗標不會還原 → 那個物件從此浮在原地不受物理影響、也不在可抓清單裡。
+        2026-11-19 實測：h01 夾著藍積木結束，下一題 t01 的真值快照裡就少了 small_blue_2，「沒動到別的東西」被判不過。
+        掛接時把別名記在檔案裡，啟動時照著改回動態。"""
+        import json
+        try:
+            names = json.load(open(self._held_file()))
+        except Exception:
+            return
+        sim = self.sim
+        for sh in sim.getObjectsInTree(sim.handle_scene, sim.object_shape_type, 0):
+            if sim.getObjectAlias(sh) in names and sim.getObjectInt32Param(sh, sim.shapeintparam_static):
+                sim.setObjectInt32Param(sh, sim.shapeintparam_static, 0)
+                sim.resetDynamicObject(sh)
+                print("[nexarm_sim] %s 上一輪被夾著沒放下，改回動態物件" % sim.getObjectAlias(sh))
+        try:
+            os.remove(self._held_file())
+        except OSError:
+            pass
+
+    def _note_held(self, alias, held):
+        import json
+        try:
+            names = set(json.load(open(self._held_file())))
+        except Exception:
+            names = set()
+        (names.add if held else names.discard)(alias)
+        try:
+            json.dump(sorted(names), open(self._held_file(), "w"))
+        except Exception:
+            pass
+
     def _grasp_candidates(self):
         """場景裡可抓的東西：動態、會碰撞、最長邊 ≤ 25 cm、不在機器人身上。結果快取 20 秒：
         604 個形狀每個問 9 次要 9 秒（第一版實測），物件清單不常變，每次只需要重新問位置。回 {handle: (最短邊 mm, 最長邊 m)}。"""
@@ -415,6 +452,8 @@ class NexArmSim(object):
         sim.setObjectInt32Param(obj, sim.shapeintparam_static, 1)
         sim.setObjectParent(obj, self._h["tcp"], True)
         self._held = (obj, parent, was_static)
+        if not was_static:
+            self._note_held(sim.getObjectAlias(obj), True)
         print("[nexarm_sim] 夾到 %s，掛在夾爪上" % sim.getObjectAlias(obj))
 
     def _release(self):
@@ -425,6 +464,7 @@ class NexArmSim(object):
             sim.setObjectParent(obj, parent, True)
             sim.setObjectInt32Param(obj, sim.shapeintparam_static, was_static)
             sim.resetDynamicObject(obj)
+            self._note_held(sim.getObjectAlias(obj), False)
             print("[nexarm_sim] 放開 %s" % sim.getObjectAlias(obj))
         except Exception as e:
             print("[nexarm_sim] 放開物件失敗：%s" % e)

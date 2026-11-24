@@ -53,9 +53,18 @@ def snapshot() -> Optional[dict]:
         objects = {}
         for h in sim.getObjectsInTree(sim.handle_scene, sim.object_shape_type, 0):
             alias = sim.getObjectAlias(h)
-            if alias.startswith(LOOSE_PREFIXES) and not sim.getObjectInt32Param(h, sim.shapeintparam_static):
-                # 只算會動的零散物件：ball_pit_base 這種別名撞到前綴的靜態底板不算
-                objects[alias] = [round(v, 3) for v in sim.getObjectPosition(h, sim.handle_world)]
+            if not alias.startswith(LOOSE_PREFIXES):
+                continue
+            held = False
+            if sim.getObjectInt32Param(h, sim.shapeintparam_static):
+                # 只算會動的零散物件：ball_pit_base 這種別名撞到前綴的靜態底板不算。
+                # 例外：模擬的 NexArm 夾住東西時把它改成靜態、掛在夾爪底下（nexarm_sim._attach）。2026-11-19 h01 夾著藍積木結束，
+                # 快照裡沒有這塊積木，judge 讀成「積木沒離開原地」而判失敗。
+                par = sim.getObjectParent(h)
+                held = par != -1 and sim.getObjectAlias(par).startswith("nexarm_")
+                if not held:
+                    continue
+            objects[alias] = [round(v, 3) for v in sim.getObjectPosition(h, sim.handle_world)]
         landmarks = {}
         for name in LANDMARKS:
             h = sim.getObject("/" + name, {"noError": True})

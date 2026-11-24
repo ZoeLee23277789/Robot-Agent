@@ -2103,6 +2103,19 @@ async def _sim_stand(robot, xy, want_m: float, tol_m: float = 0.04, push: bool =
     return d, b
 
 
+def _sim_edge_m(bbox, xy, toward) -> float:
+    """桌面上的點 xy 朝 toward（機器人）的方向走多遠會到桌緣。bbox = (x0, x1, y0, y1)。"""
+    ux, uy = toward[0] - xy[0], toward[1] - xy[1]
+    n = math.hypot(ux, uy) or 1.0
+    ux, uy = ux / n, uy / n
+    ts = []
+    if abs(ux) > 1e-6:
+        ts.append(((bbox[1] if ux > 0 else bbox[0]) - xy[0]) / ux)
+    if abs(uy) > 1e-6:
+        ts.append(((bbox[3] if uy > 0 else bbox[2]) - xy[1]) / uy)
+    return max(0.0, min(ts)) if ts else 0.0
+
+
 async def _sim_arm(robot, reach_m: float, h_m: float, yaw_deg: float):
     """夾點移到「離底座 reach_m、離地 h_m、底座轉 yaw_deg」；夾爪水平。"""
     return await robot.act("arm_to", {"x_mm": round(reach_m * 1000.0), "y_mm": round((h_m - NEX_SIM_BASE_H_M) * 1000.0),
@@ -2145,7 +2158,15 @@ async def pick_sim(robot, llm, obj: str) -> Tuple[bool, str]:
     heights = [(NEX_SIM_BALL_UP_M, "on its post"), (0.03, "lying on the surface")] if is_ball else [(NEX_SIM_GRIP_UP_M, "upright")]
     attempts = []
     for up, how in heights:
-        d, b = await _sim_stand(robot, xy, NEX_SIM_STAND_M)
+        want = NEX_SIM_STAND_M
+        if surface:
+            # 桌上的東西：前方 ToF 的防撞會把車停在桌緣外 15 cm（離桌心 0.47 m，手臂只伸得到 0.45 m）。算出物件到桌緣的距離，
+            # 車頭貼到桌緣 4 cm，關掉防撞走過去。
+            st = await robot.state()
+            bb = ((st.get("static_landmarks") or {}).get(surface["name"]) or {}).get("bbox")
+            if bb and st.get("world_xy"):
+                want = max(want, _sim_edge_m(bb, xy, st["world_xy"]) + 0.166 + 0.04)
+        d, b = await _sim_stand(robot, xy, want, push=bool(surface))
         if d is None:
             return False, f"pick({obj}) {where}: lost the robot's world pose."
         if not (0.28 <= d <= 0.45):
@@ -2216,7 +2237,7 @@ async def place_sim(robot, llm, target: str) -> Tuple[bool, str]:
         d, b = await _sim_stand(robot, xy, half + 0.166 + 0.04, tol_m=0.03, push=True)
         h = (0.10 if is_bin else float(on_surface["top_m"])) + below + (0.06 if is_bin else 0.02)
         how = "over the bin, above its rim" if is_bin else f"on top of the {on_surface['name']}"
-        inside_min = (d or 9.9) - half + 0.07      # 至少伸過邊緣 7 cm，不然會掉在外面
+        inside_min = (d or 9.9) - half + (0.07 if is_bin else 0.045)      # 至少伸過邊緣這麼多，不然會掉在外面
     else:
         d, b = await _sim_stand(robot, xy, NEX_SIM_STAND_M)
         h = below + 0.015
@@ -2225,7 +2246,10 @@ async def place_sim(robot, llm, target: str) -> Tuple[bool, str]:
     if d is None:
         return False, f"place({target}) {where}: lost the robot's world pose; still holding the object"
     r = {"ok": False, "message": "no reach tried"}
-    for reach in (min(d, 0.43), 0.40, 0.36, 0.32, 0.28):
+    # 桶子：盡量伸到桶心。桌面：放在靠自己這一側、離桌緣 6 cm 的地方，不放桌心——桌心有球座（上面可能還有球），
+    # 2026-11-19 第一版把積木伸到桌心、跟球座重疊著放開，積木被物理引擎彈到 0.44 m 外的地上。
+    reaches = (d - half + 0.06, d - half + 0.08, d - half + 0.045) if on_surface else (min(d, 0.43), 0.40, 0.36, 0.32, 0.28)
+    for reach in reaches:
         if reach + 1e-6 < inside_min or reach > d + 0.02:
             continue
         r = await _sim_arm(robot, reach, h, b)

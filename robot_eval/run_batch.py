@@ -381,7 +381,7 @@ def main() -> None:
                     help="鏡射批次：模擬 server 執行的動作同步送到這個實體 server（例如 http://127.0.0.1:8767，先 ./start_arm.sh --with-ep），"
                          "每題之間實體也歸位（手臂 home、底盤用里程計走回起點）")
     ap.add_argument("--home-after", action="store_true",
-                    help="每題做完後讓機器人走回出發點（模擬用地圖導航，鏡射時實體跟著走）；--mirror-real 時預設開，--no-home-after 關")
+                    help="每題做完後讓機器人走回出發點（模擬用地圖導航，鏡射時實體跟著走）；預設就會，--no-home-after 關")
     ap.add_argument("--no-home-after", action="store_true")
     ap.add_argument("--restart-sim", action="store_true",
                     help="CoppeliaSim 當掉/卡死時自動用 start_sim_headless.sh 重開，中途當掉的那題重跑一次（只適用無視窗模式）")
@@ -389,6 +389,10 @@ def main() -> None:
     global AUTO_RESTART_SIM, MIRROR_REAL
     AUTO_RESTART_SIM = args.restart_sim
     MIRROR_REAL = (args.mirror_real or "").strip()
+    # 2026-11-20 使用者：「我要會回去的」。以前只有鏡射批次預設回出發點（純模擬下一題會重置模擬、瞬移回起點，省時間），
+    # 但看視窗或錄影時車子做完就停在原地、下一題突然跳回去。回程在真值抓完之後才走、不經過 LLM，不影響評分也不花 token。
+    if not args.no_home_after:
+        args.home_after = True
     if MIRROR_REAL:
         os.environ["ROBOT_MIRROR_REAL"] = MIRROR_REAL   # start_all.sh 重開的模擬 server 會讀這個，掛上鏡射
         if not args.no_home_after:

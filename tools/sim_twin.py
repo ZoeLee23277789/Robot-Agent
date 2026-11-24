@@ -49,11 +49,16 @@ def find_arm(sim, root):
 
 def find_movables(sim, root):
     """場景裡會動的小東西（球、積木、垃圾）：非靜態、不在機器人身上的形狀，{別名: handle}。別名重複的不收（兩邊對不上）。
-    要在物件還沒被夾起來時建：被夾住的物件掛在夾爪底下，會被當成機器人的一部分。"""
+    被 NexArm 夾住的物件會變成靜態、掛在 nexarm_tcp 底下（nexarm_sim._attach），也要收：分身剛好在夾著東西時啟動/重連的話，
+    漏掉它就整趟都不會跟著夾爪動。"""
     robot_tree = set(sim.getObjectsInTree(root, sim.handle_all, 0))
     out, dup = {}, set()
     for sh in sim.getObjectsInTree(sim.handle_scene, sim.object_shape_type, 0):
-        if sh in robot_tree or sim.getObjectInt32Param(sh, sim.shapeintparam_static):
+        if sh in robot_tree:
+            par = sim.getObjectParent(sh)
+            if par == -1 or sim.getObjectAlias(par) != "nexarm_tcp":
+                continue
+        elif sim.getObjectInt32Param(sh, sim.shapeintparam_static):
             continue
         name = sim.getObjectAlias(sh)
         if name in out:
@@ -96,6 +101,10 @@ class FovOverlay:
         o = (0.0, 0.0, 0.0)
         self.segs = [(o, c[i]) for i in range(4)] + [(c[i], c[(i + 1) % 4]) for i in range(4)]   # 感測器座標
         self.h = sim.addDrawingObject(sim.drawing_lines, 2.0, 0.0, -1, 8, [1.0, 0.0, 1.0])
+
+    def clear(self):
+        if self.h != -1:
+            self.sim.addDrawingObjectItem(self.h, None)
 
     def update(self):
         if self.h == -1:
@@ -283,6 +292,12 @@ def main():
     arms = objs = None
     last_objs = 0.0
     obj_seen = {}
+    moving = set()
+    attached = set()      # 來源那邊正被夾著、視窗這邊已經掛到夾爪底下的物件
+    stcp = dtcp = -1
+    last_m = None
+    jseen = {}
+    fov_shown = False
     warned_running = False
     last_ok = 0.0
     while True:
@@ -296,12 +311,24 @@ def main():
                 fov = FovOverlay(dst[0], dst[1])
                 print("[sim_twin] 前鏡頭視野錐：%s" % ("有畫" if fov.h != -1 else "找不到 Vision_sensor，不畫"), flush=True)
                 arms = objs = None
+                last_m, jseen, fov_shown = None, {}, False
             if a.full and arms is None:
                 sa, da = find_arm(src[0], src[1]), find_arm(dst[0], dst[1])
                 arms = list(zip(sa, da)) if sa and da else []
                 sm, dm = find_movables(src[0], src[1]), find_movables(dst[0], dst[1])
-                objs = [(sm[k], dm[k]) for k in sm if k in dm]
-                obj_seen = {}
+                stcp = src[0].getObject("./nexarm_tcp", {"proxy": src[1], "noError": True})
+                dtcp = dst[0].getObject("./nexarm_tcp", {"proxy": dst[1], "noError": True})
+                objs, attached = [], set()
+                for k in sm:
+                    if k not in dm:
+                        continue
+                    dpar = dst[0].getObjectParent(dm[k])
+                    if dtcp != -1 and dpar == dtcp:      # 上一輪掛上去還沒放開（分身重連）：放開時放回場景最上層
+                        attached.add(sm[k])
+                        dpar = -1
+                    objs.append((sm[k], dm[k], dpar))
+                obj_seen, jseen, last_m = {}, {}, None
+                moving = set(attached)
                 print("[sim_twin] --full：手臂關節 %s，會動的物件 %d 個（來源 %d、視窗 %d）" % (
                     "有接" if arms else "兩邊沒有都裝 NexArm，不複製", len(objs), len(sm), len(dm)), flush=True)
             ssim, sroot, slift = src
@@ -313,22 +340,60 @@ def main():
                 time.sleep(1.0)
                 continue
             warned_running = False
+            # 視窗版在場景有變動時，每個呼叫大約要等一格畫面（實測 30–45 ms）。第一版每一輪對視窗送約 20 個呼叫
+            # （底盤 1、關節 7、視野錐 10、物件），一輪要 0.8 秒，而且底盤最先搬、夾著的東西最後才搬：
+            # 2026-11-20 使用者：「球跟機器人有分離」，實測開車時視窗裡夾著的積木落在夾爪後面 16–40 cm。
+            # 現在：沒變的不送；夾著的東西直接掛到視窗裡的夾爪底下（跟來源同一個做法），開車時每一輪只剩「搬底盤」一個呼叫，
+            # 手臂、夾著的東西都是它的子物件，同一格畫面一起動。視野錐只在車停著的時候畫，動的時候先收起來。
             m = ssim.getObjectMatrix(sroot, ssim.handle_world)
-            dsim.setObjectMatrix(droot, dsim.handle_world, m)
-            if slift != -1 and dlift != -1:
-                dsim.setJointPosition(dlift, ssim.getJointPosition(slift))
-            if arms:
-                for sj, dj in arms:
-                    dsim.setJointPosition(dj, ssim.getJointPosition(sj))
-            if objs and time.time() - last_objs > 0.5:   # 物件一秒兩次就夠看，而且只搬有動的：每個呼叫都會佔到無視窗那台的模擬迴圈
-                last_objs = time.time()
-                for so, do in objs:
+            moved = last_m is None or max(abs(x - y) for x, y in zip(m, last_m)) > 1e-4
+            if moved:
+                dsim.setObjectMatrix(droot, dsim.handle_world, m)
+                last_m = m
+            pairs = ([(slift, dlift)] if slift != -1 and dlift != -1 else []) + (arms or [])
+            for sj, dj in pairs:
+                v = ssim.getJointPosition(sj)
+                if abs(v - jseen.get(sj, 1e9)) > 1e-3:
+                    dsim.setJointPosition(dj, v)
+                    jseen[sj] = v
+                    moved = True
+            if objs:
+                # 全部物件一秒掃兩次（每個呼叫都會佔到無視窗那台的模擬迴圈）；正在動的（被夾著、剛被放開在滾）每一輪都看。
+                full = time.time() - last_objs > 0.5
+                if full:
+                    last_objs = time.time()
+                    still = set()
+                for so, do, dpar in objs:
+                    if not full and so not in moving:
+                        continue
+                    if stcp != -1 and dtcp != -1 and ssim.getObjectParent(so) == stcp:
+                        if so not in attached:
+                            dsim.setObjectParent(do, dtcp, True)
+                            dsim.setObjectPose(do, ssim.getObjectPose(so, stcp), dtcp)
+                            attached.add(so)
+                            moving.add(so)
+                        continue
+                    if so in attached:
+                        dsim.setObjectParent(do, dpar, True)
+                        attached.discard(so)
+                        obj_seen.pop(so, None)
                     p = ssim.getObjectPose(so, ssim.handle_world)
                     q = obj_seen.get(so)
                     if q is None or max(abs(x - y) for x, y in zip(p, q)) > 1e-3:
                         dsim.setObjectPose(do, p, dsim.handle_world)
                         obj_seen[so] = p
-            fov.update()
+                        moving.add(so)
+                    elif full:
+                        still.add(so)
+                if full:
+                    moving -= still
+            if moved:
+                if fov_shown:
+                    fov.clear()
+                    fov_shown = False
+            elif not fov_shown:
+                fov.update()
+                fov_shown = True
             if time.time() - last_ok > 30:
                 print("[sim_twin] 同步中：底盤 (%.2f, %.2f)" % (m[3], m[7]), flush=True)
                 last_ok = time.time()
@@ -340,6 +405,7 @@ def main():
             src = dst = None
             fov = None
             arms = objs = None
+            last_m, jseen, fov_shown = None, {}, False
             time.sleep(2.0)
 
 
