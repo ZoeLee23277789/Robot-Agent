@@ -51,11 +51,20 @@ Providers: `--provider openai | google | robotics-er | mlx` (default set by `ROB
 | Mode | Eyes and map | Start with |
 | --- | --- | --- |
 | Simulation | CoppeliaSim | `start_all.sh`, `run_agent.sh` |
-| Mirror | Simulation holds the map; every action is forwarded to the real robot (port 8767), which supplies the camera and distance sensor | `start_office.sh`, `run_mirror.sh` |
-| Explore | The real robot builds its own map from its distance sensor, odometry and camera | `run_explore.sh` |
+| Mirror | Simulation holds the map; every action is forwarded to the real robot (port 8767), which supplies the camera and distance sensor | `start_office.sh`, `run_agent.sh` |
+| Explore | The real robot builds its own map from its distance sensor, odometry and camera | `start_arm.sh --with-ep --explore` |
 | Arm only | A NexArm on the desk, no chassis | `start_arm.sh` |
 
 On the real robot the agent asks for confirmation before every physical step unless you pass `--no-confirm`.
+
+Explore mode, with the EP on the office Wi-Fi and the arm on its own hotspot (the pose at start-up becomes the map origin):
+
+```bash
+RM_CONN_TYPE=sta NEXARM_PORT=tcp://192.168.4.1:8080 ROBOT_EXPLORE_BOUNDS=-2,2,-2,1 ./start_arm.sh --with-ep --explore
+./run_agent.sh --robot-url http://127.0.0.1:8767 --task "scan around and report what is near you"
+```
+
+A mirror batch over the evaluation tasks: `python -m robot_eval.run_batch --mirror-real http://127.0.0.1:8767 --restart-sim --task r01`.
 
 ## Actions
 

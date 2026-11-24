@@ -1196,7 +1196,7 @@ class RoboMasterBackend(object):
         return self._scan_pano_jpg
 
     def _act_set_bounds(self, p):
-        """只改探索範圍、不動車（run_explore.sh 沿用已在跑的 server 時用）。"""
+        """只改探索範圍、不動車（沿用已在跑的 server 時用）。"""
         err = self._explore_only()
         if err:
             return err

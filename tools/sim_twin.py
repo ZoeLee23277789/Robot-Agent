@@ -12,7 +12,7 @@
     ~/rmenv/bin/python tools/sim_twin.py --real http://127.0.0.1:8767
         # explore 模式（2026-11-12）：來源不是無視窗模擬器而是實體 server 的里程計（/state 的 world_xy / world_heading_deg），
         # 並把它用 ToF 建出來的占據格（/map.json）畫成灰色方塊：視窗版就是「機器人自己建出來的模擬環境」。
-        # 視窗版要載空場景 Capstone_Explore_nexarm.ttt（run_explore.sh 會載）。
+        # 視窗版要載空場景 Capstone_Explore_nexarm.ttt（要先在視窗版手動開這個場景）。
 視窗那台要保持「停止」狀態（分身只是搬物件，不跑物理）。批次每題重開模擬時來源的 handle 會變，這裡遇到錯誤就重新找。
 """
 import argparse
