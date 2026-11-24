@@ -2772,7 +2772,7 @@ class RoboMasterBackend(object):
                     return {"ok": False, "timed_out": t, "turn_skipped": turn_left,
                             "message": "translation timed out after %.1fs (blocked by something?)" % t}
         else:
-            # 速度控制：跟 test_movement.py 同一種寫法，給速度、等時間、再停。這裡沒有中途碰撞偵測，
+            # 速度控制：給速度、等時間、再停。這裡沒有中途碰撞偵測，
             # 全靠 LLM 自己判斷該不該走這一步；只在位置控制的完成訊號不可靠時才用。
             dist = math.hypot(fwd, right)
             if dist > 1e-3:
@@ -3902,7 +3902,7 @@ def main():
     except KeyboardInterrupt:
         print("\n[server] 收到 Ctrl+C / SIGTERM，準備關閉")
     finally:
-        # 跟 test_movement.py 一樣：不管怎樣，離開前一定先停車再斷線
+        # 不管怎樣，離開前一定先停車再斷線
         backend.close()
         httpd.server_close()
 

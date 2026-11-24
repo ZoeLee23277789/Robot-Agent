@@ -40,7 +40,6 @@ captures/
 
 # 舊版套件備份目錄，純粹保險用，不進版控
 *_stub_backup_do_not_commit/
-# 從 robot_agent/core/ 移除的第三方原始檔備份與本機壓縮檔（本機保留，不上傳）
-robomaster_removed_core/
+# 本機壓縮檔與錄影（本機保留，不上傳）
 *.zip
 videos/

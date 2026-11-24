@@ -111,7 +111,7 @@ strategy, a different object to trust, when to give up on a candidate and ask_hu
 3. Otherwise, give one sentence of high-level guidance for the next few steps.
 
 Keep it short: this is strategic guidance for the next several steps, not a specific action list. Reply with \
-plain text only, no JSON."""
+plain text only, no JSON, in English."""
 
 
 AskHuman = Callable[[str], Awaitable[str]]
@@ -331,7 +331,7 @@ class RobotAgent:
             f"New steps to fold in:\n{self._full_history_text(chunk)}\n\n"
             "Write the UPDATED summary: 2 to 5 short sentences covering everything still relevant "
             "(what has been tried, what worked or failed, where the robot ended up). Be concise. "
-            "Reply with ONLY the updated summary text, nothing else."
+            "Reply with ONLY the updated summary text, in English, nothing else."
         )
         try:
             resp = await self.llm.ainvoke([UserMessage(content=prompt)])
@@ -753,7 +753,7 @@ class RobotAgent:
             f"Task: {self.task}\n\nAgent's own final report (self-reported success=true): "
             f"{self.result.final_text}\n\nImages below are sampled across the run, in order. "
             "Does the evidence actually support that the task was completed? Judge from what the "
-            "images show, not from the agent's own words."))]
+            "images show, not from the agent's own words. Write the reasoning in English."))]
         for p in paths:
             try:
                 b64 = base64.b64encode(Path(p).read_bytes()).decode("ascii")
@@ -874,7 +874,7 @@ class RobotAgent:
                         print(f"⛔ 連續失敗 {failures} 次，中止任務")
                         break
         finally:
-            # 跟 test_movement.py 的 finally 同一個精神：不管怎麼結束，先讓底盤停下來
+            # 不管怎麼結束，先讓底盤停下來
             await self.robot.stop()
             try:
                 state, jpg, _, overhead_jpg, _ = await self._observe(0)

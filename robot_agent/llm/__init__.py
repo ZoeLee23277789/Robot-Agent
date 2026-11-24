@@ -29,8 +29,7 @@ from robot_agent.llm.messages import (
 # 實際在用的行動模型）。2026-09-30 拿掉 anthropic/ollama：沒有 Anthropic API key、也從沒跑過
 # Ollama，llm_factory.py 裡本來就是各自獨立 import，刪掉不影響還在用的這兩家。其他 provider
 # (aws、azure、cerebras、deepseek、groq、openrouter、oci_raw、robot_agent cloud) 跟 models.py
-# 的預設模型清單更早之前就已經移除。要再加回某家供應商，從 git 歷史或
-# robomaster_removed_core/_unused_llm_providers_2026-09-30/ 拿對應資料夾回來，照同樣的
+# 的預設模型清單更早之前就已經移除。要再加回某家供應商，從 git 歷史拿對應資料夾回來，照同樣的
 # lazy-import 寫法接回 llm_factory.py 即可。
 
 # Type stubs for lazy imports

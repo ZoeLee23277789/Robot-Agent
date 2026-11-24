@@ -14,11 +14,11 @@
 
 使用方式（模擬停止狀態）：
     pip install coppeliasim-zmqremoteapi-client
-    python build_playground.py
-    python build_playground.py --variant hidden_red | ball_block
-    python build_playground.py --no-tiles           # 不鋪拼接地板（物件數少一點）
-    python build_playground.py --remove-objects /Cuboid
-    python build_playground.py --remove
+    python build_playground_new.py
+    python build_playground_new.py --variant hidden_red | ball_block
+    python build_playground_new.py --no-tiles           # 不鋪拼接地板（物件數少一點）
+    python build_playground_new.py --remove-objects /Cuboid
+    python build_playground_new.py --remove
 
 腳本會刪掉舊的 /Playground、/Playroom、/Office、/TaskArena 和預設 Floor，量測機器人寬度換算比例，
 用相機視線方向把機器人轉成面向 +y、放到起點並貼地。物件路徑如 /Playground/small_red。
