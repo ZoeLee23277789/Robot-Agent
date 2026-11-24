@@ -40,6 +40,7 @@ captures/
 
 # 舊版套件備份目錄，純粹保險用，不進版控
 *_stub_backup_do_not_commit/
-# 本機壓縮檔與錄影（本機保留，不上傳）
+# 本機壓縮檔、辦公室掃描原始檔與錄影（本機保留，不上傳）
 *.zip
+scans/
 videos/

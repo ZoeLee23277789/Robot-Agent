@@ -121,7 +121,6 @@ robot_eval/          datasets, judging, metrics, batch runner
 Test_Robot/          robot-side server, navigation map, arm drivers
 Env/                 CoppeliaSim scene and sensor build scripts
 tools/               calibration, recording, scan-to-scene and report utilities
-scans/               LiDAR scan and floor plan of the office
 *.sh                 launch scripts
 ```
 
